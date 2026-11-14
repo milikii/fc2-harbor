@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">
+<channel>
+<title>Sukebei - Recent Torrents</title>
+<link>https://sukebei.nyaa.si/</link>
+<description>Recent torrents on Sukebei</description>
+<atom:link href="https://sukebei.nyaa.si/?page=rss" rel="self" type="application/rss+xml" />
+<item>
+  <title>[Uploader A] FC2-PPV-1234567 Sample Title</title>
+  <link>https://sukebei.nyaa.si/view/1900001</link>
+  <guid isPermaLink="true">https://sukebei.nyaa.si/view/1900001</guid>
+  <pubDate>Sat, 14 Nov 2026 10:00:00 -0000</pubDate>
+  <nyaa:seeders>12</nyaa:seeders>
+  <nyaa:leechers>3</nyaa:leechers>
+  <nyaa:downloads>120</nyaa:downloads>
+  <nyaa:infoHash>0123456789abcdef0123456789abcdef01234567</nyaa:infoHash>
+  <nyaa:categoryId>2_2</nyaa:categoryId>
+  <nyaa:category>Art - Anime</nyaa:category>
+  <nyaa:size>1.2 GiB</nyaa:size>
+  <nyaa:trusted>No</nyaa:trusted>
+  <nyaa:remake>No</nyaa:remake>
+  <description><![CDATA[<p>FC2-PPV-1234567 sample description</p>]]></description>
+</item>
+<item>
+  <title>[Uploader B] FC2-7654321 Another One</title>
+  <link>https://sukebei.nyaa.si/view/1900002</link>
+  <guid isPermaLink="true">https://sukebei.nyaa.si/view/1900002</guid>
+  <pubDate>Sat, 14 Nov 2026 09:30:00 -0000</pubDate>
+  <nyaa:seeders>4</nyaa:seeders>
+  <nyaa:leechers>1</nyaa:leechers>
+  <nyaa:downloads>40</nyaa:downloads>
+  <nyaa:infoHash>89abcdef0123456789abcdef0123456789abcdef</nyaa:infoHash>
+  <nyaa:categoryId>2_2</nyaa:categoryId>
+  <nyaa:category>Art - Anime</nyaa:category>
+  <nyaa:size>800.0 MiB</nyaa:size>
+  <nyaa:trusted>No</nyaa:trusted>
+  <nyaa:remake>No</nyaa:remake>
+  <description><![CDATA[<p>FC2-7654321</p>]]></description>
+</item>
+<item>
+  <title>[Uploader C] Some Unrelated Movie 2026</title>
+  <link>https://sukebei.nyaa.si/view/1900003</link>
+  <guid isPermaLink="true">https://sukebei.nyaa.si/view/1900003</guid>
+  <pubDate>Sat, 14 Nov 2026 09:00:00 -0000</pubDate>
+  <nyaa:seeders>0</nyaa:seeders>
+  <nyaa:leechers>0</nyaa:leechers>
+  <nyaa:downloads>1</nyaa:downloads>
+  <nyaa:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</nyaa:infoHash>
+  <nyaa:categoryId>1_1</nyaa:categoryId>
+  <nyaa:category>Art</nyaa:category>
+  <nyaa:size>2.0 GiB</nyaa:size>
+  <nyaa:trusted>No</nyaa:trusted>
+  <nyaa:remake>No</nyaa:remake>
+  <description><![CDATA[<p>not an fc2 release</p>]]></description>
+</item>
+<item>
+  <title>[Uploader D] FC2-PPV-3334444 No Hash Item</title>
+  <link>https://sukebei.nyaa.si/view/1900004</link>
+  <guid isPermaLink="true">https://sukebei.nyaa.si/view/1900004</guid>
+  <pubDate>Sat, 14 Nov 2026 08:30:00 -0000</pubDate>
+  <nyaa:seeders>2</nyaa:seeders>
+  <nyaa:leechers>0</nyaa:leechers>
+  <nyaa:downloads>7</nyaa:downloads>
+  <nyaa:categoryId>2_2</nyaa:categoryId>
+  <nyaa:category>Art - Anime</nyaa:category>
+  <nyaa:size>500.0 MiB</nyaa:size>
+  <nyaa:trusted>No</nyaa:trusted>
+  <nyaa:remake>No</nyaa:remake>
+  <description><![CDATA[<p>FC2-PPV-3334444 without a hash</p>]]></description>
+</item>
+</channel>
+</rss>
