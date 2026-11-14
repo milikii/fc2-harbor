@@ -75,6 +75,8 @@ proxy_profiles:
 
 image_fetch:
   default_proxy: inherit_provider
+  # Content-addressed image cache, on local disk (spec 19).
+  cache_dir: /app/data/cache/images
   max_bytes: 20971520
   max_previews: 9
   min_preview_images: 3
@@ -84,8 +86,9 @@ image_fetch:
   allowed_hosts: []
 
 translation:
-  # Delivered in M3. Enabling it before then is rejected at startup.
-  enabled: false
+  # Requires base_url/api_key/model; startup fails fast if enabled without them.
+  # Set enabled: false when no translation endpoint is available.
+  enabled: true
   provider: openai_compatible
   base_url: "${TRANSLATION_BASE_URL}"
   api_key: "${TRANSLATION_API_KEY}"

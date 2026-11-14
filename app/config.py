@@ -518,6 +518,8 @@ def redact_url_credentials(url: str) -> str:
 
 class ImageFetchSection(_FrozenModel):
     default_proxy: str = "inherit_provider"
+    #: Content-addressed image cache; must be on local disk (spec 19).
+    cache_dir: str = "/app/data/cache/images"
     max_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
     max_previews: int = Field(default=9, ge=1, le=10)
     min_preview_images: int = Field(default=3, ge=0, le=10)
@@ -531,6 +533,11 @@ class ImageFetchSection(_FrozenModel):
             if not host or "/" in host or " " in host:
                 raise ValueError(f"cdn_routes key must be a bare hostname, got {host!r}")
         return {host.lower(): profile for host, profile in value.items()}
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _check_cache_dir(cls, value: str) -> str:
+        return _require_absolute_path(value, "image_fetch.cache_dir")
 
     @model_validator(mode="after")
     def _check_previews(self) -> ImageFetchSection:
@@ -784,16 +791,6 @@ class Settings(_FrozenModel):
                 raise ValueError(
                     f"download.routes[{category!r}] uses disabled downloader {downloader!r}"
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _check_translation_scope(self) -> Settings:
-        # Translation ships in M3. Failing fast beats silently ignoring it.
-        if self.translation.enabled:
-            raise ValueError(
-                "translation.enabled=true is not supported yet (delivered in M3); "
-                "keep it disabled until the translation service exists"
-            )
         return self
 
     # -- constructors -------------------------------------------------------

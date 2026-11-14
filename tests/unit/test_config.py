@@ -105,7 +105,14 @@ def test_poll_interval_bounds(tmp_path: Path) -> None:
         Settings.from_mapping(config, env={})
 
 
-def test_translation_must_stay_disabled_until_m3(tmp_path: Path) -> None:
+def test_translation_requires_credentials_when_enabled(tmp_path: Path) -> None:
+    config = deep_update(make_config(tmp_path), {"translation": {"enabled": True}})
+    with pytest.raises(ConfigError) as excinfo:
+        Settings.from_mapping(config, env={})
+    assert "translation.enabled requires" in str(excinfo.value)
+
+
+def test_translation_loads_when_fully_configured(tmp_path: Path) -> None:
     config = deep_update(
         make_config(tmp_path),
         {
@@ -117,9 +124,9 @@ def test_translation_must_stay_disabled_until_m3(tmp_path: Path) -> None:
             }
         },
     )
-    with pytest.raises(ConfigError) as excinfo:
-        Settings.from_mapping(config, env={})
-    assert "M3" in str(excinfo.value)
+    settings = Settings.from_mapping(config, env={})
+    assert settings.translation.enabled is True
+    assert settings.translation.model == "model"
 
 
 def test_route_must_reference_enabled_downloader(tmp_path: Path) -> None:

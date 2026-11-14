@@ -57,6 +57,9 @@ def test_example_config_is_valid_and_keeps_provider_order() -> None:
         "QBITTORRENT_URL": "http://192.168.1.10:8080",
         "QBITTORRENT_USERNAME": "admin",
         "QBITTORRENT_PASSWORD": "change-me",
+        "TRANSLATION_BASE_URL": "https://translate.example/v1",
+        "TRANSLATION_API_KEY": "change-me",
+        "TRANSLATION_MODEL": "gpt-4o-mini",
     }
     settings = Settings.load(ROOT / "config" / "example.yaml", env=env)
 
@@ -67,7 +70,8 @@ def test_example_config_is_valid_and_keeps_provider_order() -> None:
     assert settings.nyaa.proxy == "direct"
     assert settings.download.default_downloader == "qbittorrent"
     assert settings.downloaders.transmission.enabled is False
-    assert settings.translation.enabled is False
+    assert settings.translation.enabled is True
+    assert settings.image_fetch.cache_dir == "/app/data/cache/images"
 
 
 def test_gitignore_covers_runtime_secrets() -> None:
