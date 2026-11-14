@@ -17,6 +17,7 @@ from app.providers.base import (
     ProviderPage,
     absolute_url,
     clean_text,
+    code_matches,
     content_code,
     first_text,
 )
@@ -39,12 +40,11 @@ class AvsoxProvider(BaseProvider):
         if not cards:
             raise ProviderError("structure_changed", "avsox: no waterfall items")
 
-        code = content_code(content).upper()
         for card in cards:
             link = card.css_first("a[href]")
             title_node = card.css_first(".title, .video-title, a") or link
             title = clean_text(title_node.text(strip=True)) if title_node else None
-            if not title or code not in title.upper():
+            if not code_matches(title, content):
                 continue
             image = card.css_first("img")
             return self._result(

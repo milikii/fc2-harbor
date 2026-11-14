@@ -1,9 +1,8 @@
 """Madou metadata (last of the nine).
 
-Spec 7.1 priority 9. Selectors are this adapter's own; a page that no
-longer matches them raises ``ProviderError`` instead of returning an empty
-success. The fixture under ``tests/fixtures/providers/`` is a **constructed
-sample** mirroring the expected structure, not a captured page.
+Spec 7.1 priority 9. The site answers a search with no results as an HTTP 200 page
+whose body is a 404 panel, which must be treated as a miss, not as a broken page.
+Low hit rate for FC2, kept because spec 7.1 forbids reordering by hit rate.
 """
 
 from __future__ import annotations
@@ -16,9 +15,10 @@ from app.providers.base import (
     ProviderError,
     ProviderPage,
     absolute_url,
-    clean_text,
+    code_matches,
     content_code,
     first_text,
+    image_src,
 )
 from app.schemas.metadata import MetadataResult
 
@@ -35,17 +35,20 @@ class MadouProvider(BaseProvider):
 
     def parse(self, page: ProviderPage, content: Content) -> MetadataResult | None:
         tree = page.tree
+        text = tree.text(separator=" ", strip=True)
+        if "404" in text[:400] or tree.css_first(".f404") is not None:
+            # "No result" is served as a 404 panel with status 200.
+            return None
+
         cards = tree.css(self.CARD)
         if not cards:
             raise ProviderError("structure_changed", "madou: no articles")
 
-        code = content_code(content).upper()
         for card in cards:
-            title_node = card.css_first(".entry-title, h2, h3")
-            link_node = card.css_first(".entry-title a, h2 a, a[href]")
-            title = clean_text(title_node.text(strip=True)) if title_node else None
-            if not title or code not in title.upper():
+            title = first_text(card, (".entry-title a", ".entry-title", "h2 a", "h2"))
+            if not code_matches(title, content):
                 continue
+            link_node = card.css_first(".entry-title a, h2 a, a[href]")
             image = card.css_first("img")
             return self._result(
                 content,
@@ -54,7 +57,7 @@ class MadouProvider(BaseProvider):
                 official_url=absolute_url(
                     link_node.attributes.get("href") if link_node else None, page.url
                 ),
-                cover=absolute_url(image.attributes.get("src") if image else None, page.url),
+                cover=image_src(image, page.url),
                 raw={"provider_url": page.url, "matched": True},
             )
         return None

@@ -11,6 +11,7 @@ selectors raises :class:`ProviderError` — it never returns a half-empty succes
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -64,6 +65,31 @@ def content_code(content: Content) -> str:
     return content.display_code or content.canonical_key
 
 
+#: A site title may write the number as ``FC2-PPV-1234567``, ``FC2-1234567``,
+#: ``FC2PPV1234567`` or ``FC2 PPV 1234567``. Matching the full display code as a
+#: plain substring therefore misses most real titles, so every provider compares
+#: the **number** with tolerant separators instead (spec 6.3).
+_CODE_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def code_matches(title: str | None, content: Content) -> bool:
+    """True when ``title`` refers to the same FC2 number as ``content``."""
+
+    if not title:
+        return False
+    number = content_number(content)
+    if not number.isdigit():
+        return False
+    pattern = _CODE_PATTERN_CACHE.get(number)
+    if pattern is None:
+        pattern = re.compile(
+            rf"(?<![0-9A-Za-z])FC2[\s\-_.]*(?:PPV)?[\s\-_.]*{re.escape(number)}(?![0-9])",
+            re.IGNORECASE,
+        )
+        _CODE_PATTERN_CACHE[number] = pattern
+    return pattern.search(title) is not None
+
+
 def clean_text(value: str | None) -> str | None:
     if value is None:
         return None
@@ -102,6 +128,22 @@ def first_attr(tree: LexborHTMLParser, selectors: Iterable[str], attribute: str)
         value = clean_text(node.attributes.get(attribute))
         if value:
             return value
+    return None
+
+
+def image_src(node: Any | None, base: str) -> str | None:
+    """Image URL from a node, preferring lazy-load attributes over placeholders.
+
+    Real listings often ship a 1x1 placeholder in ``src`` and the real URL in
+    ``data-src`` (freejavbt) or only ``src`` (javdb). Prefer the lazy attribute.
+    """
+
+    if node is None:
+        return None
+    for attribute in ("data-src", "data-original", "src"):
+        value = clean_text(node.attributes.get(attribute))
+        if value and not value.startswith("data:"):
+            return absolute_url(value, base)
     return None
 
 
@@ -169,16 +211,17 @@ class BaseProvider:
         try:
             response = await self.client.get(url, headers=headers, proxy_url=self.proxy_url)
         except HttpError as exc:
+            # A 404 on a search-by-code page is a normal miss, not a broken site.
+            code = "not_found" if exc.status == 404 else "http_error"
             _log.info(
                 "provider.fetch_failed",
                 provider=self.id,
                 domain=self.host,
                 status=exc.status,
                 latency_ms=int((time.monotonic() - started) * 1000),
-                error_code="http_error",
+                error_code=code,
             )
-            raise ProviderError("http_error", f"{self.id}: {exc}", http_status=exc.status) from exc
-
+            raise ProviderError(code, f"{self.id}: {exc}", http_status=exc.status) from exc
         if response.status != 200:
             raise ProviderError(
                 "http_error", f"{self.id}: status {response.status}", http_status=response.status

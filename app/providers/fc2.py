@@ -90,7 +90,7 @@ def _strip_code_prefix(title: str) -> str:
     return remainder or title.strip()
 
 
-_CODE_PREFIX_RE = re.compile(r"^FC2[\s\-_.]*PPV?[\s\-_.]*\d{3,12}", re.IGNORECASE)
+_CODE_PREFIX_RE = re.compile(r"^FC2[\s\-_.]*(?:PPV)?[\s\-_.]*\d{3,12}", re.IGNORECASE)
 
 
 def _parse_date(value: str | None) -> datetime | None:

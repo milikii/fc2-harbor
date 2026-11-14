@@ -127,8 +127,22 @@
 - 实现：优先 `meta[property="og:title"]`（真实页面有），去掉前缀番号；不使用站点通用的 `h1`/`h2` 兜底（真实页面里它们是「コンテンツマーケット」「サービス情報」）。
 - 理由：用真实页面验证时发现通用标签会抓到站点导航文字，必须显式排除。图片 src 在真实页面是协议相对（`//cdn/…`），统一按页面 URL 补全。
 
-## 19. 其余八个 provider 的 selector 未经线上验证
+## 19. provider selector 的线上验证状态
 
 - 规格书：§7.4「线上结构变化时标记 provider 不健康」
-- 现状：构建环境访问 javdb（Cloudflare 验证码）、javlibrary（403）、miss_av（403）、avsox（JS 挑战）均不可用；这些适配器按站点常见结构实现，fixture 为构造样本。`fc2` 已用真实页面验证。
-- 处理：解析不到锚点一律抛 `ProviderError("structure_changed")`，不会伪造成功；协调器连续失败 3 次记 `metadata.provider_unhealthy` 警告。运维首次真实运行时按 `docs/runbook-smoke.md` 看日志确认，结构不符就补新 fixture 修 selector。
+- 已验证（真实页面，经代理）：
+  - `Fc2`：文章页 HIT，标题/简介/封面/9 张预览图全部正确。
+  - `Mmtv`：搜索页 HIT（`FC2-PPV-5006408`），标题与封面正确；真实卡片是 `div.video` + `h3.video-title > a`。
+  - `Javdb`：真实 200 响应的结构已确认（`.movie-list .item > a.box`，标题在 `.video-title > strong`，短格式 `FC2-5000075`），据此重写 selector；随后该站对本机返回 403（限流），自动化 live 检查不稳定。
+  - `freejavbt`：真实页面结构已确认（`.video-list-item > .card`，`h5.card-title` + `p.card-text`，懒加载 `data-src`），但 `?s=` 搜索不返回 FC2 条目，因此真实结果是「未命中」而非解析失败。
+  - `Madou`：无结果时返回 200 + 404 面板，已按「未命中」处理并加 fixture。
+  - `avsox`：返回 1.5KB 的 JS 挑战页，等同不可用。
+- 仍无法验证（403 / 挑战页）：`fc2_hub`(javten.com)、`Javlibrary`、`miss_av`(missav123.com)、`avsox`。这四家的 fixture 仍是构造样本。
+- 处理：解析不到锚点一律抛 `ProviderError("structure_changed")`；HTTP 404 与「页面里没有该编号」都返回未命中，不计入 provider 健康度（只有真正的结构/网络错误才累计，连续 3 次记 `metadata.provider_unhealthy`）。
+
+## 20. 编号匹配按数字而非完整 display code
+
+- 规格书：§6.3 canonical display 是 `FC2-PPV-1234567`
+- 问题：真实站点标题普遍写 `FC2-5000075`、`fc2-ppv 5006408`、`FC2PPV1234567`，用完整 display code 做子串比较会大面积「未命中」，而日志看起来一切正常。
+- 实现：公共 `code_matches(title, content)`，按数字编号匹配并容忍分隔符与 PPV 有无：`(?<![0-9A-Za-z])FC2[\s\-_.]*(?:PPV)?[\s\-_.]*<number>(?![0-9])`；七个按标题匹配的 provider 全部改用它，测试覆盖四种写法与「不同编号不匹配」。
+- 理由：匹配口径必须与真实数据一致；卡片展示仍用规范的 `FC2-PPV-<number>`。

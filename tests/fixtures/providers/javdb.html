@@ -1,11 +1,21 @@
 <!DOCTYPE html>
-<html><body>
-<div class="movie-list">
+<html><head><title>JavDB</title></head><body>
+<!-- Constructed sample mirroring the real search result structure:
+     .movie-list > .item > a.box > .cover img + .video-title > strong. -->
+<div class="movie-list h cols-4 vcols-8">
   <div class="item">
-    <a href="/v/abcdef">
-      <img src="https://c0.jdbstatic.com/covers/ab.jpg">
-      <div class="video-title">FC2-PPV-1234567 タイトル</div>
-      <div class="meta">2026-11-01</div>
+    <a href="/v/abcd12" class="box" title="サンプル作品タイトル">
+      <div class="cover "><img loading="lazy" src="https://c0.jdbstatic.com/covers/ab/abcd12.jpg"></div>
+      <div class="video-title"><strong>FC2-1234567</strong> サンプル作品タイトル</div>
+      <div class="score"><span class="value">3.33分</span></div>
+      <div class="meta">2026-10-28</div>
+    </a>
+  </div>
+  <div class="item">
+    <a href="/v/wxyz34" class="box" title="別の作品">
+      <div class="cover "><img loading="lazy" src="https://c0.jdbstatic.com/covers/wx/wxyz34.jpg"></div>
+      <div class="video-title"><strong>OTHER-001</strong> 別の作品</div>
+      <div class="meta">2026-10-27</div>
     </a>
   </div>
 </div>

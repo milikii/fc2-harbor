@@ -15,11 +15,15 @@ Rules:
   adapter; never edit an old fixture to make a broken parser pass;
 - every adapter must raise `ProviderError("structure_changed")` when its anchors
   are missing, so a silent empty result is impossible;
-- live verification is manual: fetch the real page and compare against the fixture's
-  structure. `fc2.html` mirrors a real article page (og:* title/description/cover,
-  protocol-relative sample images, site-chrome h1/h2 that must never be used as the
-  title); the other eight could not be reached from the build environment
-  (Cloudflare / 403 / JS challenge) and are unverified against live markup.
+- live verification status (see `docs/deviations.md` §19):
+  - verified against real pages: `fc2.html` (og:* title/description/cover,
+    protocol-relative sample images, site-chrome h1/h2), `mmtv.html`
+    (`div.video` + `h3.video-title > a`), `javdb.html` (`.movie-list .item > a.box`,
+    title in `.video-title > strong`), `freejavbt.html`
+    (`.video-list-item > .card`, `h5.card-title` + `p.card-text`, lazy `data-src`),
+    `madou_not_found.html` (200 + 404 panel);
+  - still constructed: `fc2_hub.html`, `javlibrary.html`, `miss_av.html`,
+    `avsox.html` (403 / JS challenge from the build environment).
 
 | File | Provider | Shape |
 |---|---|---|

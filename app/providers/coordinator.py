@@ -173,10 +173,13 @@ class MetadataCoordinator:
             )
         except ProviderError as exc:
             latency = int((time.monotonic() - started) * 1000)
+            # "not found" is a normal miss (the site simply has no such entry), so
+            # it must not count against provider health.
+            miss = exc.code == "not_found"
             aggregated.runs.append(
                 ProviderRun(
                     provider=provider.id,
-                    success=False,
+                    success=miss,
                     http_status=exc.http_status,
                     error_code=exc.code,
                     latency_ms=latency,
@@ -184,7 +187,10 @@ class MetadataCoordinator:
                     result_json=None,
                 )
             )
-            self._note_failure(provider.id, exc.code)
+            if miss:
+                self._failures[provider.id] = 0
+            else:
+                self._note_failure(provider.id, exc.code)
             return
         except TimeoutError:
             latency = int((time.monotonic() - started) * 1000)

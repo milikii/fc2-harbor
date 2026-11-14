@@ -198,6 +198,20 @@ async def test_single_censorship_tag_is_kept(tmp_path: Path) -> None:
     assert aggregated.sources["censorship"] == "A"
 
 
+async def test_not_found_is_a_miss_not_a_failure(tmp_path: Path) -> None:
+    a = FakeProvider("A", error="not_found")
+    b = FakeProvider("B", result=result("B", title="Title B"))
+
+    aggregated = await coordinator(a, b, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.runs[0].success is True
+    assert aggregated.runs[0].error_code == "not_found"
+    assert aggregated.title_ja == "Title B"
+    assert coordinator(a).health() == {} or coordinator(a).health().get("A", 0) == 0
+
+
 async def test_provider_failure_does_not_stop_the_chain(tmp_path: Path) -> None:
     a = FakeProvider("A", error="http_error")
     b = FakeProvider("B", result=result("B", title="Title B"))
