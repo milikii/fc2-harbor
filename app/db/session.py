@@ -8,10 +8,11 @@ Notes
 -----
 * WAL, ``foreign_keys=ON`` and a generous ``busy_timeout`` are set per
   connection.
-* ``BEGIN IMMEDIATE`` is used for every transaction on SQLite. The application
-  is a single process with a handful of concurrent tasks, so serialising writers
-  at transaction start is far cheaper than debugging lock upgrades, and it makes
-  "check then write" inside one transaction genuinely atomic.
+* Write transactions are serialised by an in-process ``asyncio.Lock``. The
+  application is a single container and the only writer of this SQLite file, so
+  that is both simpler and safer than per-connection lock juggling: "check then
+  write" inside one transaction stays atomic, readers in WAL mode never block, and
+  a nested write transaction fails fast instead of deadlocking on a lock.
 * The application never creates tables itself: schema changes only happen
   through Alembic.
 """
@@ -21,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,10 @@ from app.logging import get_logger
 _log = get_logger("db")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+#: Guards against a write transaction being opened from inside another one in the
+#: same task (a deadlock that would otherwise show up as a 30s SQLite timeout).
+_TX_DEPTH: ContextVar[int] = ContextVar("db_tx_depth", default=0)
 
 
 def _is_sqlite(url: str) -> bool:
@@ -61,6 +67,7 @@ class Database:
         self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False, autoflush=False
         )
+        self._write_lock = asyncio.Lock()
 
     @staticmethod
     def _install_sqlite_pragmas(engine: Any) -> None:
@@ -75,13 +82,6 @@ class Database:
             finally:
                 cursor.close()
 
-        @event.listens_for(engine, "begin")
-        def _begin_immediate(conn: Any) -> None:
-            # Serialise writers up-front; never leave a deferred transaction to
-            # upgrade its lock halfway through the gate check.
-            if conn.dialect.name == "sqlite":
-                conn.exec_driver_sql("BEGIN IMMEDIATE")
-
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         """Read-mostly session; callers manage their own transaction."""
@@ -91,10 +91,25 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[AsyncSession]:
-        """Explicit transaction boundary: everything commits or nothing does."""
+        """Explicit write transaction: everything commits or nothing does.
 
-        async with self.session_factory() as session, session.begin():
-            yield session
+        Serialised per database instance so a gate check and its write cannot
+        interleave with another writer. Read-only work must use :meth:`session`
+        instead — opening a write transaction from inside one raises immediately.
+        """
+
+        if _TX_DEPTH.get():
+            raise RuntimeError(
+                "nested write transaction: use Database.session() for reads, or "
+                "pass the existing session down"
+            )
+        token = _TX_DEPTH.set(1)
+        try:
+            async with self._write_lock:
+                async with self.session_factory() as session, session.begin():
+                    yield session
+        finally:
+            _TX_DEPTH.reset(token)
 
     async def ping(self) -> None:
         """Cheap connectivity check used by the readiness endpoint."""
