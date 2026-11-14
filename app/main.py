@@ -23,7 +23,7 @@ from aiogram import Bot, Dispatcher
 from app.api.health import create_health_app
 from app.bots.commands import build_commands_router
 from app.bots.manual import PendingSubmissionStore, build_manual_router
-from app.config import ConfigError, Settings
+from app.config import ConfigError, Settings, applied_env_overrides
 from app.db.session import Database, migrate_async
 from app.downloaders.coordinator import DownloaderRegistry
 from app.logging import configure_logging, get_logger
@@ -33,6 +33,10 @@ from app.services.gate import ContentGate
 from app.services.jobs import JobSubmitter
 from app.services.manual_ingest import ManualIngestService
 from app.services.notify import TelegramAdminNotifier
+from app.services.releases import ReleaseRegistrar
+from app.services.state import record_event
+from app.services.subscription import SubscriptionPoller
+from app.sources.nyaa import NyaaSource
 
 _log = get_logger("main")
 
@@ -44,6 +48,7 @@ async def run(settings: Settings) -> None:
         timezone=settings.app.timezone,
         log_level=settings.app.log_level,
         downloaders=sorted(settings.downloaders.enabled_names()),
+        env_overrides=applied_env_overrides(),
     )
 
     if settings.telegram.subscription_bot_token is None:
@@ -54,6 +59,7 @@ async def run(settings: Settings) -> None:
 
     db = Database(settings.app.database_url)
     registry = DownloaderRegistry.from_settings(settings)
+    nyaa_source: NyaaSource | None = None
     bot: Bot | None = None
     dispatcher: Dispatcher | None = None
     server: uvicorn.Server | None = None
@@ -62,6 +68,7 @@ async def run(settings: Settings) -> None:
     try:
         await migrate_async(settings.app.database_url)
         await db.ping()
+        await _audit_provider_configuration(db, settings)
 
         organizer = Organizer(
             verify_sha256=settings.storage.verify_sha256_on_copy,
@@ -81,7 +88,13 @@ async def run(settings: Settings) -> None:
             notifier=notifier,
         )
 
-        await reconcile_startup(db=db, submitter=submitter, settings=settings)
+        await reconcile_startup(db=db, submitter=submitter, settings=settings, notifier=notifier)
+
+        nyaa_source = NyaaSource(settings=settings)
+        registrar = ReleaseRegistrar(db=db, gate=gate)
+        poller = SubscriptionPoller(
+            db=db, source=nyaa_source, registrar=registrar, settings=settings
+        )
 
         ingest = ManualIngestService(db=db, gate=gate, submitter=submitter, settings=settings)
         store = PendingSubmissionStore()
@@ -131,6 +144,7 @@ async def run(settings: Settings) -> None:
                 ),
                 name="monitor",
             ),
+            asyncio.create_task(poller.run(stop_event), name="subscription"),
         ]
         _log.info("app.ready", tasks=[task.get_name() for task in tasks])
 
@@ -151,11 +165,40 @@ async def run(settings: Settings) -> None:
         if bot is not None:
             with contextlib.suppress(Exception):
                 await bot.session.close()
+        if nyaa_source is not None:
+            with contextlib.suppress(Exception):
+                await nyaa_source.aclose()
         with contextlib.suppress(Exception):
             await registry.close_all()
         with contextlib.suppress(Exception):
             await db.dispose()
         _log.info("app.stopped")
+
+
+async def _audit_provider_configuration(db: Database, settings: Settings) -> None:
+    """Record an explicitly relaxed provider configuration (spec 7.1).
+
+    Strict mode already failed at config load. Reaching this point with disabled
+    providers means the operator set ``provider.strict_enabled=false`` on purpose,
+    so the deviation is logged loudly and written to the audit trail.
+    """
+
+    disabled = settings.provider.disabled_providers()
+    if not disabled:
+        return
+    _log.warning(
+        "provider.disabled",
+        providers=disabled,
+        strict_enabled=settings.provider.strict_enabled,
+        detail="provider.strict_enabled=false; spec 7.1 expects all nine enabled",
+    )
+    async with db.transaction() as session:
+        await record_event(
+            session,
+            "provider.disabled",
+            actor="system",
+            reason=",".join(disabled),
+        )
 
 
 def _install_signal_handlers(stop_event: asyncio.Event) -> None:
