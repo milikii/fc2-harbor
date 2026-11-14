@@ -65,6 +65,9 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
   per-candidate isolation, spec 21 round metrics.
 - **Bounded resubmission**: startup reconciliation retries `ACCEPTED` jobs, stops
   at `download.max_retries` and reports instead of looping forever.
+- **Push queue query** (`app/services/push_queue.py`): read-only selection of
+  contents that have a release but are not accepted, not blacklisted and not yet
+  notified — M4 will drive cards from it without touching the gate.
 
 ## Requirements
 
@@ -89,7 +92,7 @@ Checks:
 
 ```bash
 .venv/bin/pytest              # unit + integration, no network
-.venv/bin/pytest --run-live   # manual live smoke against sukebei.nyaa.si
+.venv/bin/pytest --run-live   # manual live smoke; needs LIVE_PROXY_URL on filtered networks
 .venv/bin/ruff check .
 .venv/bin/mypy app
 ```
