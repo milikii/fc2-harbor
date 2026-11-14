@@ -16,7 +16,7 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 | M1 | Skeleton: config, logging, DB + migrations, gate, state machine, qBittorrent, manual bot, organizer, monitor | **done** |
 | M2 | Nyaa site-wide subscription: RSS + search catch-up, cursor, overlap re-check, content/release dedupe | **done** |
 | M3 | Nine metadata providers, proxy pool, image cache, translation | **done** |
-| M4 | Cards, full Telegram loop, message group deletion, push pipeline | planned |
+| M4 | Cards, full Telegram loop, message group deletion, push pipeline | **done** |
 | M5 | Transmission, admin commands, metrics, full integration tests, backup/deploy docs | planned |
 
 ### What M1 does
@@ -89,6 +89,24 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
   dedupe by normalised URL and SHA-256, `file_id` cached per bot and per hash.
 - **Translation** (`app/services/translate.py`): OpenAI-compatible, non-fatal on
   failure, result cached in `contents.description_zh`.
+
+### What M4 adds
+
+- **Push pipeline** (`app/services/publisher.py`): for every discovered content —
+  enrich once, send the cover card (tag / title / code / Nyaa link), send the full
+  description as follow-up messages when it does not fit a caption, send previews as
+  media groups of 2–10, and record every message id. Resumable after a crash: a
+  pending notification continues from the last recorded step.
+- **Cards** (`app/services/cards.py`): caption under Telegram's limit, no silent
+  truncation (overflow goes out as separate messages), short `dl:`/`blk:` callback
+  data, and `FC2-PPV-<number>` as the displayed code.
+- **Buttons** (`app/bots/subscription.py`): download re-checks the gate, writes the
+  accepted entry and the job in one transaction, submits to qBittorrent and settles
+  the button to 已下载 / 重试; a second click is idempotent. 不感兴趣 writes the
+  blacklist first and only then deletes the whole message group.
+- **Group deletion** (`app/services/notifications.py`): cover, description and all
+  preview groups are deleted together; Telegram failures are retried in the
+  background and never roll back the blacklist (spec 9.4).
 
 ## Requirements
 
@@ -230,8 +248,12 @@ See [`docs/deviations.md`](docs/deviations.md). The short version:
 7. Nyaa fixtures are constructed samples, never captured real pages.
 8. Image host allowlist derives from provider registered domains unless set.
 9. Translation is enabled by default and fails startup without credentials.
-10. Only the FC2 provider has been verified against a live page; the other eight
-    could not be reached from the build environment (Cloudflare/403/JS challenge).
+10. Five providers were verified against real pages (Fc2, Mmtv, Javdb, freejavbt,
+    Madou); fc2_hub, Javlibrary, miss_av and avsox answer 403 / a JS challenge from
+    the build environment and remain constructed samples.
+11. Cards are pushed to every allowed user id; 不感兴趣 deletes that chat's group only.
+12. Without a usable cover the card degrades to a text message instead of not being
+    pushed at all.
 
 ## Licence
 
