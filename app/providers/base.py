@@ -192,10 +192,12 @@ class BaseProvider:
         client: HttpClient,
         proxy_url: str | None = None,
         timeout_seconds: float = 15.0,
+        proxy_region: str | None = None,
     ) -> None:
         self.client = client
         self.proxy_url = proxy_url
         self.timeout_seconds = timeout_seconds
+        self.proxy_region = proxy_region
 
     # -- URL construction (per provider) ------------------------------------
 
@@ -209,7 +211,13 @@ class BaseProvider:
         headers = {"Referer": self.referer} if self.referer else {}
         started = time.monotonic()
         try:
-            response = await self.client.get(url, headers=headers, proxy_url=self.proxy_url)
+            response = await self.client.get(
+                url,
+                headers=headers,
+                proxy_url=self.proxy_url,
+                proxy_label=self.proxy_key or self.id,
+                proxy_region=self.proxy_region,
+            )
         except HttpError as exc:
             # A 404 on a search-by-code page is a normal miss, not a broken site.
             code = "not_found" if exc.status == 404 else "http_error"

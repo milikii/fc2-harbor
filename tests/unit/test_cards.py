@@ -120,6 +120,16 @@ def test_card_keyboard_has_three_buttons_in_order() -> None:
     assert rows[0][1].callback_data.startswith("blk:")
 
 
+def test_download_button_labels() -> None:
+    from app.bots.subscription import DOWNLOAD_LABELS
+    from app.services.acceptance import AcceptOutcome
+
+    assert DOWNLOAD_LABELS[AcceptOutcome.SUBMITTED] == "已下载"
+    assert DOWNLOAD_LABELS[AcceptOutcome.ALREADY] == "已下载"
+    assert DOWNLOAD_LABELS[AcceptOutcome.FAILED] == "重试"
+    assert DOWNLOAD_LABELS[AcceptOutcome.BLACKLISTED] == "已拉黑"
+
+
 def test_settled_keyboard_removes_the_download_callback() -> None:
     from app.bots.keyboards import card_keyboard_after
 

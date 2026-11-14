@@ -99,6 +99,20 @@ def test_direct_profile_is_required(tmp_path: Path) -> None:
     assert "direct" in str(excinfo.value)
 
 
+def test_nyaa_paths_reject_uploader_filters(tmp_path: Path) -> None:
+    """Spec 6.1: the subscription must stay site-wide, never u=offkab."""
+
+    for overrides in (
+        {"query": "FC2&u=offkab"},
+        {"rss_path": "/?page=rss&q=FC2&u=offkab"},
+        {"search_path": "/?f=0&c=0_0&q=FC2&u=offkab&p={page}"},
+    ):
+        config = deep_update(make_config(tmp_path), {"nyaa": overrides})
+        with pytest.raises(ConfigError) as excinfo:
+            Settings.from_mapping(config, env={})
+        assert "site-wide" in str(excinfo.value)
+
+
 def test_poll_interval_bounds(tmp_path: Path) -> None:
     config = deep_update(make_config(tmp_path), {"nyaa": {"poll_interval_seconds": 100}})
     with pytest.raises(ConfigError):
