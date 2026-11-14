@@ -243,6 +243,27 @@ class HttpClient:
         # Unreachable: the loop either returns or raises.
         raise HttpNetworkError(f"request to {domain} failed", url=url) from last_error
 
+    @asynccontextmanager
+    async def stream(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        proxy_url: str | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """Streaming GET for callers that must cap the body (images).
+
+        Redirects are followed by the client here; the image fetcher uses its own
+        client so it can validate every hop itself.
+        """
+
+        domain = urlsplit(url).hostname or "unknown"
+        async with self._limiter.slot(domain):
+            async with self._client_for(proxy_url).stream(
+                "GET", url, headers=dict(headers or {})
+            ) as response:
+                yield response
+
     def _backoff(self, attempt: int) -> float:
         base = min(BACKOFF_BASE_SECONDS * (2**attempt), BACKOFF_MAX_SECONDS)
         # Jitter for retry spacing, not a security decision.
