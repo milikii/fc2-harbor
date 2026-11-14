@@ -33,6 +33,35 @@ def category_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def card_keyboard(
+    content_id: str, official_url: str | None, *, download_label: str = "下载"
+) -> InlineKeyboardMarkup:
+    """Spec 9.2: download, not interested, then the FC2 official page."""
+
+    from app.services.cards import block_callback, download_callback
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text=download_label, callback_data=download_callback(content_id)),
+            InlineKeyboardButton(text="不感兴趣", callback_data=block_callback(content_id)),
+        ]
+    ]
+    if official_url:
+        rows.append([InlineKeyboardButton(text="FC2 官网", url=official_url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def card_keyboard_after(
+    content_id: str, official_url: str | None, *, download_label: str
+) -> InlineKeyboardMarkup:
+    """The same card with a settled download button (已下载 / 重试 / 已拉黑)."""
+
+    keyboard = card_keyboard(content_id, official_url, download_label=download_label)
+    rows = list(keyboard.inline_keyboard)
+    rows[0][0] = InlineKeyboardButton(text=download_label, callback_data="noop")
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def confirm_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

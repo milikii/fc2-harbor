@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from pathlib import Path
 from types import FrameType
 
 import uvicorn
@@ -23,19 +24,29 @@ from aiogram import Bot, Dispatcher
 from app.api.health import create_health_app
 from app.bots.commands import build_commands_router
 from app.bots.manual import PendingSubmissionStore, build_manual_router
+from app.bots.subscription import build_subscription_router
 from app.config import ConfigError, Settings, applied_env_overrides
 from app.db.session import Database, migrate_async
 from app.downloaders.coordinator import DownloaderRegistry
 from app.logging import configure_logging, get_logger
+from app.network.clients import HttpClient
+from app.network.image_fetcher import ImageFetcher
+from app.network.proxy import ProxyRouter
 from app.organizer.monitor import DownloadMonitor, reconcile_startup, run_monitor_loop
 from app.organizer.mover import Organizer
+from app.providers.coordinator import MetadataCoordinator, build_providers
+from app.services.acceptance import SubscriptionActions
 from app.services.gate import ContentGate
 from app.services.jobs import JobSubmitter
 from app.services.manual_ingest import ManualIngestService
+from app.services.metadata import MetadataService, build_translator, derive_image_allowlist
+from app.services.notifications import MessageDeleter
 from app.services.notify import TelegramAdminNotifier
+from app.services.publisher import Publisher, run_publisher_loop
 from app.services.releases import ReleaseRegistrar
 from app.services.state import record_event
 from app.services.subscription import SubscriptionPoller
+from app.services.telegram_assets import TelegramAssetUploader
 from app.sources.nyaa import NyaaSource
 
 _log = get_logger("main")
@@ -60,6 +71,10 @@ async def run(settings: Settings) -> None:
     db = Database(settings.app.database_url)
     registry = DownloaderRegistry.from_settings(settings)
     nyaa_source: NyaaSource | None = None
+    http_client: HttpClient | None = None
+    image_fetcher: ImageFetcher | None = None
+    translator = None
+    subscription_bot: Bot | None = None
     bot: Bot | None = None
     dispatcher: Dispatcher | None = None
     server: uvicorn.Server | None = None
@@ -96,9 +111,71 @@ async def run(settings: Settings) -> None:
             db=db, source=nyaa_source, registrar=registrar, settings=settings
         )
 
+        proxy_router = ProxyRouter(settings.proxy_profiles)
+        http_client = HttpClient(
+            user_agent=settings.nyaa.user_agent,
+            timeout_seconds=settings.nyaa.timeout_seconds,
+            retries=settings.nyaa.retries,
+            per_domain_concurrency=settings.nyaa.concurrency,
+            max_retry_after_seconds=settings.nyaa.max_retry_after_seconds,
+        )
+        providers, fallback = build_providers(settings, client=http_client, router=proxy_router)
+        coordinator = MetadataCoordinator(
+            providers=providers, settings=settings, nyaa_fallback=fallback
+        )
+        image_fetcher = ImageFetcher(
+            cache_dir=Path(settings.image_fetch.cache_dir),
+            allowed_hosts=derive_image_allowlist(settings),
+            max_bytes=settings.image_fetch.max_bytes,
+            user_agent=settings.nyaa.user_agent,
+        )
+        translator = build_translator(settings)
+        metadata_service = MetadataService(
+            db=db,
+            coordinator=coordinator,
+            fetcher=image_fetcher,
+            settings=settings,
+            router=proxy_router,
+            translator=translator,
+        )
+
+        dispatcher = Dispatcher()
+        tasks_extra: list[asyncio.Task[None]] = []
+        actions = SubscriptionActions(db=db, gate=gate, submitter=submitter, settings=settings)
+        deleter: MessageDeleter | None = None
+        publisher: Publisher | None = None
+        if settings.telegram.subscription_bot_token is not None:
+            subscription_bot = Bot(
+                token=settings.telegram.subscription_bot_token.get_secret_value()
+            )
+            uploader = TelegramAssetUploader(db=db, bot_name="subscription")
+            publisher = Publisher(
+                db=db,
+                metadata=metadata_service,
+                uploader=uploader,
+                bot=subscription_bot,
+                settings=settings,
+            )
+            deleter = MessageDeleter(db=db, bot=subscription_bot)
+            dispatcher.include_router(
+                build_subscription_router(
+                    db=db,
+                    actions=actions,
+                    deleter=deleter,
+                    settings=settings,
+                    allowed_user_ids=settings.telegram.allowed_user_ids,
+                )
+            )
+            tasks_extra.append(
+                asyncio.create_task(
+                    run_publisher_loop(publisher, interval_seconds=60, stop_event=stop_event),
+                    name="publisher",
+                )
+            )
+            tasks_extra.append(asyncio.create_task(deleter.run(stop_event), name="message-deleter"))
+
         ingest = ManualIngestService(db=db, gate=gate, submitter=submitter, settings=settings)
         store = PendingSubmissionStore()
-        dispatcher = Dispatcher()
         dispatcher.include_router(
             build_commands_router(
                 db=db,
@@ -145,6 +222,7 @@ async def run(settings: Settings) -> None:
                 name="monitor",
             ),
             asyncio.create_task(poller.run(stop_event), name="subscription"),
+            *tasks_extra,
         ]
         _log.info("app.ready", tasks=[task.get_name() for task in tasks])
 
@@ -162,6 +240,18 @@ async def run(settings: Settings) -> None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
     finally:
+        if subscription_bot is not None:
+            with contextlib.suppress(Exception):
+                await subscription_bot.session.close()
+        if translator is not None:
+            with contextlib.suppress(Exception):
+                await translator.aclose()
+        if image_fetcher is not None:
+            with contextlib.suppress(Exception):
+                await image_fetcher.aclose()
+        if http_client is not None:
+            with contextlib.suppress(Exception):
+                await http_client.aclose()
         if bot is not None:
             with contextlib.suppress(Exception):
                 await bot.session.close()
