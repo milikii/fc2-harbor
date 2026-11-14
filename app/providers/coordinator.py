@@ -1,0 +1,364 @@
+"""Nine-provider aggregation — spec 7.2 / 7.4.
+
+Merge rules implemented exactly:
+
+1. providers run in the fixed priority order (never reordered);
+2. a valid high-priority field is never overwritten by a lower one;
+3. missing fields keep being filled by later providers;
+4. the cover is the highest-priority valid image;
+5. previews merge in provider order and original order;
+6. images dedupe by normalised URL here, by content SHA-256 when they are stored;
+7. ``max_previews`` caps the list;
+8. aggregation stops early once the core fields and ``min_preview_images`` exist;
+9. one provider failing never stops the chain;
+10. the Nyaa page fallback runs last, only for what is still missing.
+
+Conflicting censorship tags become ``UNKNOWN`` instead of picking a winner
+(spec 7.3), and the original tag per provider is kept in ``sources``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from app.config import Settings
+from app.db.enums import Censorship
+from app.db.models import Content
+from app.logging import get_logger
+from app.network.clients import HttpClient
+from app.network.proxy import ProxyRouter
+from app.providers.avsox import AvsoxProvider
+from app.providers.base import BaseProvider, ProviderError, ProviderPage
+from app.providers.fc2 import Fc2Provider
+from app.providers.fc2_hub import Fc2HubProvider
+from app.providers.freejavbt import FreejavbtProvider
+from app.providers.javdb import JavdbProvider
+from app.providers.javlibrary import JavlibraryProvider
+from app.providers.madou import MadouProvider
+from app.providers.miss_av import MissAvProvider
+from app.providers.mmtv import MmtvProvider
+from app.providers.nyaa_fallback import NyaaFallbackProvider
+from app.schemas.metadata import AssetCandidate, MetadataResult, ProviderContext
+
+_log = get_logger("metadata")
+
+PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
+    "Fc2": Fc2Provider,
+    "fc2_hub": Fc2HubProvider,
+    "Javdb": JavdbProvider,
+    "Mmtv": MmtvProvider,
+    "freejavbt": FreejavbtProvider,
+    "miss_av": MissAvProvider,
+    "Javlibrary": JavlibraryProvider,
+    "avsox": AvsoxProvider,
+    "Madou": MadouProvider,
+}
+
+HEALTH_WARNING_THRESHOLD = 3
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRun:
+    provider: str
+    success: bool
+    http_status: int | None
+    error_code: str | None
+    latency_ms: int
+    asset_count: int
+    result_json: dict[str, object] | None
+
+
+@dataclass(slots=True)
+class AggregatedMetadata:
+    content_key: str
+    title_ja: str | None = None
+    description_ja: str | None = None
+    official_url: str | None = None
+    censorship: Censorship = Censorship.UNKNOWN
+    release_date: datetime | None = None
+    cover: AssetCandidate | None = None
+    previews: list[AssetCandidate] = field(default_factory=list)
+    #: field name → provider id that supplied it (spec 7.3 audit trail).
+    sources: dict[str, str] = field(default_factory=dict)
+    runs: list[ProviderRun] = field(default_factory=list)
+    stopped_early: bool = False
+
+    def core_complete(self) -> bool:
+        return bool(self.title_ja and self.description_ja)
+
+    def as_raw(self) -> dict[str, object]:
+        return {
+            "title_ja": self.title_ja,
+            "description_ja": self.description_ja,
+            "official_url": self.official_url,
+            "censorship": self.censorship.value,
+            "release_date": self.release_date.isoformat() if self.release_date else None,
+            "cover": self.cover.url if self.cover else None,
+            "previews": [item.url for item in self.previews],
+            "sources": dict(self.sources),
+            "stopped_early": self.stopped_early,
+        }
+
+
+class MetadataCoordinator:
+    def __init__(
+        self,
+        *,
+        providers: Sequence[BaseProvider],
+        settings: Settings,
+        nyaa_fallback: NyaaFallbackProvider | None = None,
+    ) -> None:
+        self.providers = list(providers)
+        self.settings = settings
+        self.nyaa_fallback = nyaa_fallback
+        self._failures: dict[str, int] = {}
+
+    async def aggregate(
+        self,
+        content: Content,
+        ctx: ProviderContext,
+        *,
+        max_previews: int | None = None,
+        min_previews: int | None = None,
+    ) -> AggregatedMetadata:
+        limit = max_previews if max_previews is not None else self.settings.image_fetch.max_previews
+        minimum = (
+            min_previews
+            if min_previews is not None
+            else self.settings.image_fetch.min_preview_images
+        )
+        aggregated = AggregatedMetadata(content_key=content.canonical_key)
+
+        for provider in self.providers:
+            await self._run_and_merge(provider, content, ctx, aggregated, limit)
+            if aggregated.core_complete() and len(aggregated.previews) >= minimum:
+                aggregated.stopped_early = True
+                _log.info(
+                    "metadata.early_stop",
+                    canonical_key=content.canonical_key,
+                    provider=provider.id,
+                    previews=len(aggregated.previews),
+                )
+                break
+
+        needs_fallback = (
+            not aggregated.core_complete()
+            or not aggregated.previews
+            or len(aggregated.previews) < minimum
+        )
+        if self.nyaa_fallback is not None and needs_fallback:
+            await self._run_fallback(content, ctx, aggregated, limit)
+
+        aggregated.previews = aggregated.previews[:limit]
+        return aggregated
+
+    # -- internals ----------------------------------------------------------
+
+    async def _run_and_merge(
+        self,
+        provider: BaseProvider,
+        content: Content,
+        ctx: ProviderContext,
+        aggregated: AggregatedMetadata,
+        limit: int,
+    ) -> None:
+        started = time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                provider.fetch(content, ctx), timeout=provider.timeout_seconds
+            )
+        except ProviderError as exc:
+            latency = int((time.monotonic() - started) * 1000)
+            aggregated.runs.append(
+                ProviderRun(
+                    provider=provider.id,
+                    success=False,
+                    http_status=exc.http_status,
+                    error_code=exc.code,
+                    latency_ms=latency,
+                    asset_count=0,
+                    result_json=None,
+                )
+            )
+            self._note_failure(provider.id, exc.code)
+            return
+        except TimeoutError:
+            latency = int((time.monotonic() - started) * 1000)
+            aggregated.runs.append(
+                ProviderRun(
+                    provider=provider.id,
+                    success=False,
+                    http_status=None,
+                    error_code="timeout",
+                    latency_ms=latency,
+                    asset_count=0,
+                    result_json=None,
+                )
+            )
+            self._note_failure(provider.id, "timeout")
+            return
+
+        latency = int((time.monotonic() - started) * 1000)
+        self._failures[provider.id] = 0
+        self._merge(aggregated, result, limit)
+        aggregated.runs.append(
+            ProviderRun(
+                provider=provider.id,
+                success=True,
+                http_status=200,
+                error_code=None,
+                latency_ms=latency,
+                asset_count=len(result.previews) + (1 if result.cover else 0),
+                result_json=_result_json(result),
+            )
+        )
+
+    async def _run_fallback(
+        self,
+        content: Content,
+        ctx: ProviderContext,
+        aggregated: AggregatedMetadata,
+        limit: int,
+    ) -> None:
+        fallback = self.nyaa_fallback
+        if fallback is None:
+            return
+        try:
+            url = fallback.url_for_release(ctx.release_url, ctx.release_item_id)
+        except ProviderError:
+            return
+        try:
+            page = await asyncio.wait_for(
+                fallback.client.get(url, proxy_url=fallback.proxy_url),
+                timeout=fallback.timeout_seconds,
+            )
+        except Exception as exc:
+            _log.info("metadata.fallback_failed", error_code=type(exc).__name__)
+            return
+        try:
+            result = fallback.parse(
+                ProviderPage(url=url, html=page.text, status=page.status), content
+            )
+        except ProviderError as exc:
+            _log.info("metadata.fallback_failed", error_code=exc.code)
+            return
+        if result is None:
+            return
+        # Never overwrites: the fallback only fills what is still missing.
+        self._merge(aggregated, result, limit)
+        aggregated.runs.append(
+            ProviderRun(
+                provider="Nyaa",
+                success=True,
+                http_status=page.status,
+                error_code=None,
+                latency_ms=0,
+                asset_count=len(result.previews) + (1 if result.cover else 0),
+                result_json=_result_json(result),
+            )
+        )
+
+    def _merge(
+        self,
+        aggregated: AggregatedMetadata,
+        result: MetadataResult,
+        limit: int,
+    ) -> None:
+        """Field-by-field merge; an existing value is never overwritten."""
+
+        if result.title_ja and aggregated.title_ja is None:
+            aggregated.title_ja = result.title_ja
+            aggregated.sources["title_ja"] = result.provider
+        if result.description_ja and aggregated.description_ja is None:
+            aggregated.description_ja = result.description_ja
+            aggregated.sources["description_ja"] = result.provider
+        if result.official_url and aggregated.official_url is None:
+            aggregated.official_url = result.official_url
+            aggregated.sources["official_url"] = result.provider
+        if result.release_date and aggregated.release_date is None:
+            aggregated.release_date = result.release_date
+            aggregated.sources["release_date"] = result.provider
+
+        if result.censorship is not None:
+            if aggregated.censorship is Censorship.UNKNOWN:
+                aggregated.censorship = result.censorship
+                aggregated.sources["censorship"] = result.provider
+            elif aggregated.censorship is not result.censorship:
+                # Spec 7.3: conflicting sources mean UNKNOWN, and the conflict is
+                # recorded rather than silently resolved.
+                aggregated.censorship = Censorship.UNKNOWN
+                aggregated.sources["censorship"] = (
+                    f"conflict:{aggregated.sources.get('censorship', '?')},{result.provider}"
+                )
+
+        if aggregated.cover is None and result.cover is not None:
+            aggregated.cover = result.cover
+            aggregated.sources["cover"] = result.provider
+
+        known = {item.url for item in aggregated.previews}
+        for candidate in result.previews:
+            if len(aggregated.previews) >= limit:
+                break
+            if candidate.url in known:
+                continue
+            known.add(candidate.url)
+            aggregated.previews.append(candidate)
+
+    def _note_failure(self, provider_id: str, code: str) -> None:
+        failures = self._failures.get(provider_id, 0) + 1
+        self._failures[provider_id] = failures
+        if failures >= HEALTH_WARNING_THRESHOLD:
+            _log.warning(
+                "metadata.provider_unhealthy",
+                provider=provider_id,
+                consecutive_failures=failures,
+                error_code=code,
+            )
+
+    def health(self) -> dict[str, int]:
+        return dict(self._failures)
+
+
+def _result_json(result: MetadataResult) -> dict[str, object]:
+    return {
+        "title_ja": result.title_ja,
+        "description_ja": result.description_ja,
+        "official_url": result.official_url,
+        "censorship": result.censorship.value if result.censorship else None,
+        "release_date": result.release_date.isoformat() if result.release_date else None,
+        "cover": result.cover.url if result.cover else None,
+        "previews": [item.url for item in result.previews],
+        "raw": result.raw,
+    }
+
+
+def build_providers(
+    settings: Settings, *, client: HttpClient, router: ProxyRouter
+) -> tuple[list[BaseProvider], NyaaFallbackProvider]:
+    """Instantiate the nine adapters in the configured (fixed) order."""
+
+    providers: list[BaseProvider] = []
+    for name in settings.provider.priorities["jav_fc2"]:
+        source = settings.provider.sources[name]
+        if not source.enabled:
+            _log.warning("metadata.provider_disabled", provider=name)
+            continue
+        provider_class = PROVIDER_CLASSES[name]
+        providers.append(
+            provider_class(
+                client=client,
+                proxy_url=router.for_provider(source.proxy).url,
+                timeout_seconds=source.timeout_seconds,
+            )
+        )
+
+    fallback = NyaaFallbackProvider(
+        client=client,
+        proxy_url=router.for_provider(settings.nyaa.proxy).url,
+        timeout_seconds=settings.nyaa.timeout_seconds,
+    )
+    return providers, fallback

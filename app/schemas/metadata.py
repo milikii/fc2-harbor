@@ -66,3 +66,6 @@ class ProviderContext(BaseModel):
     timeout_seconds: float = 15.0
     max_previews: int = 9
     referer: str | None = None
+    #: The release the content came from, used by the Nyaa fallback (spec 7.2).
+    release_url: str | None = None
+    release_item_id: str | None = None
