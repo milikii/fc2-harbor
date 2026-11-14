@@ -45,6 +45,7 @@ from app.db.models import (
     Release,
 )
 from app.logging import get_logger
+from app.schemas.release import ReleaseCandidate
 from app.services.state import ACTIVE_OR_COMPLETED, record_event
 
 _log = get_logger("gate")
@@ -167,7 +168,7 @@ class ContentGate:
             )
             return decision
 
-        content = await self._get_or_create_content(session, subject)
+        content = await self.ensure_content(session, subject)
         release = Release(
             content_id=content.id,
             source=subject.source,
@@ -234,7 +235,13 @@ class ContentGate:
             job_id=job.id,
         )
 
-    async def _get_or_create_content(self, session: AsyncSession, subject: GateSubject) -> Content:
+    async def ensure_content(self, session: AsyncSession, subject: GateSubject) -> Content:
+        """Return the content row for a subject, creating it when missing.
+
+        Shared by :meth:`admit` and the release registrar so content creation has
+        exactly one implementation.
+        """
+
         content = await session.scalar(
             select(Content).where(Content.canonical_key == subject.canonical_key)
         )
@@ -278,3 +285,29 @@ class ContentGate:
             existing_job_id=existing_job_id,
             detail=detail,
         )
+
+
+def subject_from_candidate(candidate: ReleaseCandidate) -> GateSubject | None:
+    """Map a source candidate onto a gate subject.
+
+    Returns ``None`` when the source could not normalise a content identity; such
+    a candidate must never reach the gate (spec 6.3: no reliable number means no
+    automatic flow).
+    """
+
+    hint = candidate.content_hint
+    if hint is None:
+        return None
+    return GateSubject(
+        content_type=hint.content_type,
+        canonical_key=hint.canonical_key,
+        display_code=hint.display_code,
+        info_hash=candidate.info_hash,
+        source=candidate.source,
+        source_item_id=candidate.source_item_id,
+        source_url=candidate.source_url,
+        magnet=candidate.magnet,
+        raw_title=candidate.title,
+        published_at=candidate.published_at,
+        raw_payload=candidate.raw_payload or None,
+    )
