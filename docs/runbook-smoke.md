@@ -31,7 +31,7 @@ cp config/example.yaml config/config.yaml && ${EDITOR:-vi} config/config.yaml
 | `TELEGRAM_ALLOWED_USER_IDS` | 允许使用的 Telegram 用户 id，逗号分隔 |
 | `QBITTORRENT_URL` / `QBITTORRENT_USERNAME` / `QBITTORRENT_PASSWORD` | NAS 上的 qB Web API |
 | `TRANSLATION_BASE_URL` / `TRANSLATION_API_KEY` / `TRANSLATION_MODEL` | OpenAI 兼容翻译端点；没有就设 `translation.enabled: false` |
-| `SUBSCRIPTION_BOT_TOKEN` | 留空（M4 才启用） |
+| `SUBSCRIPTION_BOT_TOKEN` | 订阅推送 Bot（M4 起使用；留空则只跑手动 Bot 与订阅记录） |
 
 `config/config.yaml` 必改：
 
@@ -101,6 +101,16 @@ magnet:?xt=urn:btih:<INFO_HASH>&dn=FC2-PPV-9999999
 4. `/mnt/storage/library/fc2/FC2-PPV-9999999/payload.bin` 存在；`/mnt/storage/downloads/fc2/<job_id>` 已清空；qB 任务消失但文件保留。
 
 > 公网 tracker 可能没人做种。要稳定跑完，可在 NAS 的 qB 里添加同一个种子并保持做种，或直接在该 qB 上做种后再投递磁链。
+
+## 4b. 卡片冒烟（M4）
+
+1. 订阅轮询发现新内容后（或手动投递一条后等下一轮），Telegram 收到：
+   封面图 + caption（有码/无码标签、标题、`FC2-PPV-<编号>`、Nyaa 链接），
+   随后是完整日文/中文简介（若 caption 放不下）与预览图组（2–10 张一组）。
+2. 点「下载」→ 按钮变「已下载」，qB 出现任务；再点一次 → 提示已处理，qB 不新增任务。
+3. 换一条内容点「不感兴趣」→ 封面、简介、全部预览图组被删除，编号进入黑名单；
+   再用手动 Bot 发同编号 → 拒绝。
+4. 重启容器 → 已发送的卡片不会重复推送（`notifications` 里是 sent）。
 
 ## 5. 门禁冒烟
 
