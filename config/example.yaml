@@ -1,0 +1,114 @@
+# fc2-harbor configuration template.
+#
+# Copy to `config/config.yaml` (git-ignored) and adjust. Every ${ENV_VAR}
+# placeholder is expanded from the process environment / `.env` at startup.
+# Secrets must only ever live in `.env` or Docker secrets, never in this file.
+
+app:
+  timezone: Asia/Shanghai
+  database_url: sqlite:////app/data/app.db
+  log_level: INFO
+  log_json: true
+  # Internal health/status endpoint, bound inside the container network only.
+  health_host: 0.0.0.0
+  health_port: 8080
+
+telegram:
+  # Subscription bot is delivered in M4; leave empty until then.
+  subscription_bot_token: "${SUBSCRIPTION_BOT_TOKEN}"
+  manual_bot_token: "${MANUAL_BOT_TOKEN}"
+  allowed_user_ids: "${TELEGRAM_ALLOWED_USER_IDS}"
+  proxy: direct
+
+nyaa:
+  base_url: https://sukebei.nyaa.si
+  query: FC2
+  scope: site
+  poll_interval_seconds: 180
+  initial_lookback_hours: 24
+  proxy: direct
+
+provider:
+  # Fixed order, never reordered by hit rate (spec 7.1). Validated at startup.
+  priorities:
+    jav_fc2: [Fc2, fc2_hub, Javdb, Mmtv, freejavbt, miss_av, Javlibrary, avsox, Madou]
+  sources:
+    Fc2: {host: adult.contents.fc2.com, enabled: true, proxy: japan}
+    fc2_hub: {host: javten.com, enabled: true, proxy: japan}
+    Javdb: {host: javdb.com, enabled: true, proxy: japan}
+    Mmtv: {host: 7mmtv.sx, enabled: true, proxy: japan}
+    freejavbt: {host: freejavbt.com, enabled: true, proxy: japan}
+    miss_av: {host: missav123.com, enabled: true, proxy: japan}
+    Javlibrary: {host: javlibrary.com, enabled: true, proxy: japan}
+    avsox: {host: avsox.click, enabled: true, proxy: japan}
+    Madou: {host: madou.club, enabled: true, proxy: japan}
+
+proxy_profiles:
+  direct: {type: direct}
+  japan: {type: socks5h, url: "${JP_PROXY_URL}", region: JP}
+  japan_backup: {type: http, url: "${JP_BACKUP_PROXY_URL}", region: JP}
+
+image_fetch:
+  default_proxy: inherit_provider
+  max_bytes: 20971520
+  max_previews: 9
+  min_preview_images: 3
+  cdn_routes: {}
+  # Domain allowlist for image/page downloads (spec 20). Empty means "derive
+  # from configured provider hosts"; it is never "allow everything".
+  allowed_hosts: []
+
+translation:
+  # Delivered in M3. Enabling it before then is rejected at startup.
+  enabled: false
+  provider: openai_compatible
+  base_url: "${TRANSLATION_BASE_URL}"
+  api_key: "${TRANSLATION_API_KEY}"
+  model: "${TRANSLATION_MODEL}"
+  target_language: zh-CN
+
+download:
+  default_downloader: qbittorrent
+  routes:
+    fc2: qbittorrent
+    jav: qbittorrent
+    cn: qbittorrent
+    western: qbittorrent
+    review: qbittorrent
+
+downloaders:
+  qbittorrent:
+    enabled: true
+    url: "${QBITTORRENT_URL}"
+    username: "${QBITTORRENT_USERNAME}"
+    password: "${QBITTORRENT_PASSWORD}"
+    # Remote path seen by qBittorrent. The app writes to a per-job subdirectory.
+    save_path_template: /downloads/{category}/{job_id}
+    category: fc2-harbor
+    timeout_seconds: 15
+    poll_interval_seconds: 30
+    # Two consecutive identical observations, 10s apart (spec 14.2).
+    stability_checks: 2
+    stability_interval_seconds: 10
+    max_stability_wait_seconds: 600
+  transmission:
+    enabled: false
+    url: "${TRANSMISSION_URL}"
+    username: "${TRANSMISSION_USERNAME}"
+    password: "${TRANSMISSION_PASSWORD}"
+
+storage:
+  # Explicit mapping only. Unmapped paths are an error, never string-patched.
+  path_mappings:
+    - remote: /downloads
+      local: /downloads
+  final_roots:
+    fc2: /library/fc2
+    jav: /library/jav
+    cn: /library/cn
+    western: /library/western
+    review: /library/_review
+  dir_name_max_length: 120
+  verify_sha256_on_copy: false
+  fsync_on_copy: true
+  copy_chunk_bytes: 4194304
