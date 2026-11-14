@@ -9,6 +9,8 @@ app:
   database_url: sqlite:////app/data/app.db
   log_level: INFO
   log_json: true
+  # Rotating log file on the data volume so logs are persisted and backed up.
+  log_file: /app/data/logs/app.log
   # Internal health/status endpoint, bound inside the container network only.
   health_host: 0.0.0.0
   health_port: 8080
@@ -81,9 +83,21 @@ image_fetch:
   max_previews: 9
   min_preview_images: 3
   cdn_routes: {}
-  # Domain allowlist for image/page downloads (spec 20). Empty means "derive
-  # from configured provider hosts"; it is never "allow everything".
+  # Domain allowlist for image/page downloads (spec 20). Empty means "derive from
+  # the registered domain of every configured provider" (fc2.com, javdb.com, …).
+  # Set explicit hosts to be stricter; subdomains are included automatically.
   allowed_hosts: []
+  # allowed_hosts:
+  #   - fc2.com
+  #   - jdbstatic.com
+  #   - javten.com
+  #   - 7mmtv.sx
+  #   - freejavbt.com
+  #   - missav123.com
+  #   - javlibrary.com
+  #   - avsox.click
+  #   - madou.club
+  #   - nyaa.si
 
 translation:
   # Requires base_url/api_key/model; startup fails fast if enabled without them.
@@ -126,6 +140,7 @@ downloaders:
     url: "${TRANSMISSION_URL}"
     username: "${TRANSMISSION_USERNAME}"
     password: "${TRANSMISSION_PASSWORD}"
+    save_path_template: /downloads/{category}/{job_id}
 
 storage:
   # Explicit mapping only. Unmapped paths are an error, never string-patched.

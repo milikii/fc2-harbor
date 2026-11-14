@@ -17,7 +17,7 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 | M2 | Nyaa site-wide subscription: RSS + search catch-up, cursor, overlap re-check, content/release dedupe | **done** |
 | M3 | Nine metadata providers, proxy pool, image cache, translation | **done** |
 | M4 | Cards, full Telegram loop, message group deletion, push pipeline | **done** |
-| M5 | Transmission, admin commands, metrics, full integration tests, backup/deploy docs | planned |
+| M5 | Transmission, admin commands, metrics, full integration tests, backup/deploy docs | **done** |
 
 ### What M1 does
 
@@ -107,6 +107,24 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 - **Group deletion** (`app/services/notifications.py`): cover, description and all
   preview groups are deleted together; Telegram failures are retried in the
   background and never roll back the blacklist (spec 9.4).
+
+### What M5 adds
+
+- **Transmission adapter** (`app/downloaders/transmission.py`): same protocol as
+  qBittorrent (session handshake, add, get, list, remove with
+  `delete-local-data: false`), disabled by default and selectable per route.
+- **Admin commands** (`/block`, `/unblock`, `/pause`, `/resume`, `/providers`):
+  blacklist management, a runtime pause switch for the poller, and a provider health
+  report. `/unblock` keeps the accepted record on purpose.
+- **Metrics** (`app/services/metrics.py`): per provider `hit / miss / structure /
+  error` plus average latency and hit rate — a miss and a broken selector are
+  different counters — and per proxy profile calls, failures, failure rate, region
+  and last error. Exposed through `/status` and `/providers`.
+- **Spec 22.3 integration tests** (`tests/integration/test_spec_22_3.py`): the seven
+  end-to-end guarantees, one test per sentence of the specification.
+- **Acceptance and deployment docs**: [`docs/acceptance.md`](docs/acceptance.md)
+  maps all 19 checklist items to evidence; [`docs/deploy.md`](docs/deploy.md) walks
+  through a from-zero installation.
 
 ## Requirements
 
@@ -228,9 +246,19 @@ tests/                unit + integration + live (opt-in), all offline by default
 | `image_fetch.allowed_hosts` | `[]` | Strict image host allowlist; empty derives from provider registered domains |
 | `translation.enabled` | true | Requires `TRANSLATION_BASE_URL` / `_API_KEY` / `_MODEL` |
 | `image_fetch.max_previews` / `min_preview_images` | 9 / 3 | Card preview budget and early-stop threshold |
+| `app.log_file` | `/app/data/logs/app.log` | Rotating log file on the data volume |
+| `downloaders.transmission.save_path_template` | `/downloads/{category}/{job_id}` | Same contract as the qBittorrent template |
 
 `FC2_LOG_LEVEL` and `FC2_DATABASE_URL` are the only environment overrides
 (env > yaml).
+
+## Documentation
+
+- [`docs/BT_AUTOMATION_SPEC.md`](docs/BT_AUTOMATION_SPEC.md) — the specification.
+- [`docs/deviations.md`](docs/deviations.md) — every deliberate deviation, with reasons.
+- [`docs/deploy.md`](docs/deploy.md) — from-zero deployment, backup and recovery.
+- [`docs/runbook-smoke.md`](docs/runbook-smoke.md) — step-by-step acceptance run on the NAS.
+- [`docs/acceptance.md`](docs/acceptance.md) — the spec 24 checklist with evidence.
 
 ## Known deviations
 

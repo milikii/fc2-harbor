@@ -6,6 +6,8 @@
 
 ---
 
+> 第一次部署请先照 `docs/deploy.md` 完成安装与配置；本文件只做验收，不解释安装。
+
 ## 0. 前置条件
 
 - NAS 上已装 Docker + Docker Compose。
@@ -131,6 +133,16 @@ PY
 ```
 
 再发同一编号（换一个 info hash）→ 回复「该编号在黑名单中，已拒绝投递」。
+
+## 5b. 管理命令冒烟
+
+- `/providers` → 返回每个源的 `hit / miss / structure / error / 平均耗时 / 命中率`，
+  以及「需要关注」列表；`structure` 不为 0 说明某个源改版了。
+- `/pause` → 日志出现 `subscription.paused`，不再有新的 `subscription.round`；
+  `/resume` 恢复。
+- `/block FC2-PPV-9999999` → 「已加入黑名单」；再发一次 → 「已在黑名单中」；
+  `/unblock FC2-PPV-9999999` → 「已解除黑名单（已接受记录保留）」。
+- `/status` → 任务数、最近失败。
 
 ## 6. 失败路径冒烟（可选，但建议做一次）
 
