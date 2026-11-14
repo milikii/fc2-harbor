@@ -142,6 +142,26 @@ async def test_newest_published_first(db: Database) -> None:
     assert [c.canonical_key for c in candidates] == ["fc2_ppv:7777777", "fc2_ppv:6666666"]
 
 
+async def test_pending_notification_keeps_the_content_in_the_queue(db: Database) -> None:
+    """A half-sent card must be resumable, so pending does not exclude it."""
+
+    content_id = await seed_content(db, number="8888888")
+    async with db.transaction() as session:
+        session.add(
+            Notification(
+                content_id=content_id,
+                bot_name="subscription",
+                chat_id=111,
+                status=NotificationStatus.PENDING,
+            )
+        )
+
+    async with db.session() as session:
+        candidates = await find_pending_push_candidates(session)
+
+    assert [c.canonical_key for c in candidates] == ["fc2_ppv:8888888"]
+
+
 async def test_limit_is_respected(db: Database) -> None:
     for index in range(5):
         await seed_content(db, number=f"900000{index}")

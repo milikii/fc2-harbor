@@ -19,6 +19,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.enums import NotificationStatus
 from app.db.models import AcceptedEntry, BlacklistEntry, Content, Notification, Release
 
 DEFAULT_PUSH_BATCH = 50
@@ -79,7 +80,14 @@ async def find_pending_push_candidates(
         .where(
             Content.canonical_key.not_in(select(AcceptedEntry.canonical_key)),
             Content.canonical_key.not_in(select(BlacklistEntry.canonical_key)),
-            Content.id.not_in(select(Notification.content_id)),
+            # A pending notification means a card was started but not finished, so
+            # the content stays in the queue for the publisher to resume. Only a
+            # sent or deleted card counts as "already handled".
+            Content.id.not_in(
+                select(Notification.content_id).where(
+                    Notification.status.in_([NotificationStatus.SENT, NotificationStatus.DELETED])
+                )
+            ),
         )
         .order_by(Release.published_at.desc().nullslast(), Content.created_at.asc())
         .limit(limit)

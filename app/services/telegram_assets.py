@@ -10,6 +10,7 @@ file_id when available, otherwise uploads the local file and remembers the id.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram.types import FSInputFile
@@ -20,6 +21,12 @@ from app.db.session import Database
 from app.logging import get_logger
 
 _log = get_logger("telegram.assets")
+
+
+@dataclass(frozen=True, slots=True)
+class SentPhoto:
+    file_id: str
+    message_id: int | None
 
 
 class TelegramUploadError(RuntimeError):
@@ -65,16 +72,29 @@ class TelegramAssetUploader:
         *,
         caption: str | None = None,
     ) -> str:
-        """Send one asset, reusing a cached file_id when possible.
+        """Send one asset and return its file_id (cached when possible)."""
 
-        Returns the Telegram file_id. A missing local file is an error: the asset
-        row must point at something the container can read.
+        sent = await self.send_photo_message(bot, chat_id, asset, caption=caption)
+        return sent.file_id
+
+    async def send_photo_message(
+        self,
+        bot: object,
+        chat_id: int,
+        asset: Asset,
+        *,
+        caption: str | None = None,
+    ) -> SentPhoto:
+        """Send one asset, reusing a cached file_id, and return the message id.
+
+        A missing local file is an error: the asset row must point at something the
+        container can read.
         """
 
         cached = await self.cached_file_id(asset.sha256 or "")
         if cached:
-            await bot.send_photo(chat_id, cached, caption=caption)  # type: ignore[attr-defined]
-            return cached
+            message = await bot.send_photo(chat_id, cached, caption=caption)  # type: ignore[attr-defined]
+            return SentPhoto(file_id=cached, message_id=getattr(message, "message_id", None))
 
         path = Path(asset.local_path or "")
         # A single stat is negligible next to a network upload.
@@ -99,7 +119,20 @@ class TelegramAssetUploader:
             bot=self.bot_name,
             size_bytes=asset.size_bytes,
         )
-        return file_id
+        return SentPhoto(file_id=file_id, message_id=getattr(message, "message_id", None))
+
+    async def photo_reference(self, asset: Asset) -> str | FSInputFile:
+        """A file_id string when already uploaded, otherwise a local file input."""
+
+        cached = await self.cached_file_id(asset.sha256 or "")
+        if cached:
+            return cached
+        path = Path(asset.local_path or "")
+        if not asset.local_path or not path.is_file():  # noqa: ASYNC240
+            raise TelegramUploadError(
+                "missing_file", f"asset {asset.id} has no readable local file"
+            )
+        return FSInputFile(str(path))
 
 
 def _largest_photo_id(message: object) -> str | None:

@@ -235,6 +235,124 @@ class ContentGate:
             job_id=job.id,
         )
 
+    async def admit_existing(
+        self,
+        session: AsyncSession,
+        *,
+        content_id: str,
+        canonical_key: str,
+        release_id: str,
+        info_hash: str | None,
+        origin: AcceptedOrigin,
+        category: str,
+        downloader: DownloaderName,
+        actor: str | None = None,
+    ) -> GateDecision:
+        """Accept a content whose release already exists (spec 9.3).
+
+        Discovery already wrote the release, so re-running :meth:`admit` would try
+        to insert a duplicate. This path applies the same gate rules to the existing
+        rows and then writes only the accepted entry and the job.
+
+        Must run inside a transaction owned by the caller.
+        """
+
+        blacklisted = await session.scalar(
+            select(BlacklistEntry.id).where(BlacklistEntry.canonical_key == canonical_key)
+        )
+        if blacklisted is not None:
+            await record_event(
+                session,
+                "gate.rejected",
+                canonical_key=canonical_key,
+                content_id=content_id,
+                release_id=release_id,
+                actor=actor,
+                reason=GateReason.BLACKLISTED.value,
+            )
+            return GateDecision(allowed=False, reason=GateReason.BLACKLISTED, content_id=content_id)
+
+        accepted = await session.scalar(
+            select(AcceptedEntry.id).where(AcceptedEntry.canonical_key == canonical_key)
+        )
+        if accepted is not None:
+            job_id = await self._active_job_for_content(session, content_id)
+            return GateDecision(
+                allowed=False,
+                reason=GateReason.ALREADY_ACCEPTED,
+                content_id=content_id,
+                job_id=job_id,
+                existing_job_id=job_id,
+            )
+
+        existing_job = await session.scalar(
+            select(DownloadJob.id).where(
+                DownloadJob.release_id == release_id,
+                DownloadJob.status.in_(list(ACTIVE_OR_COMPLETED)),
+            )
+        )
+        if existing_job is not None:
+            return GateDecision(
+                allowed=True,
+                reason=GateReason.ALLOWED,
+                content_id=content_id,
+                release_id=release_id,
+                job_id=existing_job,
+            )
+
+        session.add(
+            AcceptedEntry(canonical_key=canonical_key, content_id=content_id, origin=origin)
+        )
+        job = DownloadJob(
+            release_id=release_id,
+            content_id=content_id,
+            downloader=downloader,
+            info_hash=info_hash,
+            status=DownloadStatus.ACCEPTED,
+            category=category,
+            idempotency_key=f"download:{release_id}",
+        )
+        session.add(job)
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            raise GateConflictError(f"concurrent acceptance for {canonical_key}") from exc
+
+        await record_event(
+            session,
+            "gate.accepted",
+            canonical_key=canonical_key,
+            content_id=content_id,
+            release_id=release_id,
+            job_id=job.id,
+            actor=actor,
+            reason=origin.value,
+        )
+        _log.info(
+            "gate.accepted_existing",
+            canonical_key=canonical_key,
+            content_id=content_id,
+            job_id=job.id,
+        )
+        return GateDecision(
+            allowed=True,
+            reason=GateReason.ALLOWED,
+            content_id=content_id,
+            release_id=release_id,
+            job_id=job.id,
+        )
+
+    async def _active_job_for_content(self, session: AsyncSession, content_id: str) -> str | None:
+        return await session.scalar(
+            select(DownloadJob.id)
+            .where(
+                DownloadJob.content_id == content_id,
+                DownloadJob.status.in_(list(ACTIVE_OR_COMPLETED)),
+            )
+            .order_by(DownloadJob.created_at.desc())
+            .limit(1)
+        )
+
     async def ensure_content(self, session: AsyncSession, subject: GateSubject) -> Content:
         """Return the content row for a subject, creating it when missing.
 
