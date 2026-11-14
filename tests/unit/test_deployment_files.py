@@ -97,3 +97,12 @@ def test_spec_is_versioned_in_the_repository() -> None:
     text = spec.read_text(encoding="utf-8")
     assert "## 11. 统一内容门禁" in text
     assert "## 23. 分阶段开发顺序" in text
+
+
+def test_decision_log_and_runbook_exist() -> None:
+    deviations = ROOT / "docs" / "deviations.md"
+    runbook = ROOT / "docs" / "runbook-smoke.md"
+    assert deviations.exists()
+    assert runbook.exists()
+    assert "pydantic-settings" in deviations.read_text(encoding="utf-8")
+    assert "通过标准" in runbook.read_text(encoding="utf-8")

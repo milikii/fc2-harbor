@@ -20,6 +20,26 @@ from app.services.gate import ContentGate
 from tests.support import FakeDownloader, make_settings
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-live",
+        action="store_true",
+        default=False,
+        help="run live network smoke tests (never in CI)",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip ``live`` tests unless --run-live was passed (spec 22.2)."""
+
+    if config.getoption("--run-live"):
+        return
+    skip_live = pytest.mark.skip(reason="live smoke test: pass --run-live to enable")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip_live)
+
+
 @pytest.fixture(scope="session")
 def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     directory = tmp_path_factory.mktemp("schema")
