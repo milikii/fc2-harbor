@@ -1,0 +1,113 @@
+"""Enumerations shared by the ORM models, schemas and services.
+
+Spec references: section 12 (database columns), section 13 (download state
+machine), section 7.3 (censorship tags), section 10 (categories).
+
+All enums are ``str`` enums so they serialise to plain strings in SQLite JSON
+columns, logs and Telegram callback payloads.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class ContentType(StrEnum):
+    """Spec 6.3 / 12.1."""
+
+    FC2 = "fc2"
+    JAV = "jav"
+    GENERIC = "generic"
+
+
+class Censorship(StrEnum):
+    """Spec 7.3 — unified censorship tag."""
+
+    CENSORED = "censored"
+    UNCENSORED = "uncensored"
+    THIN = "thin"
+    UNKNOWN = "unknown"
+
+
+class MetadataStatus(StrEnum):
+    """Aggregation progress of a content row."""
+
+    PENDING = "pending"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class AssetRole(StrEnum):
+    """Spec 12.4 — assets.role."""
+
+    COVER = "cover"
+    PREVIEW = "preview"
+
+
+class AcceptedOrigin(StrEnum):
+    """Spec 12.5 — accepted_entries.origin."""
+
+    SUBSCRIPTION_BUTTON = "subscription_button"
+    MANUAL = "manual"
+    ADMIN = "admin"
+
+
+class DownloaderName(StrEnum):
+    """Spec 12.7 — download_jobs.downloader."""
+
+    QBITTORRENT = "qbittorrent"
+    TRANSMISSION = "transmission"
+
+
+class DownloadStatus(StrEnum):
+    """Spec 13 — download job lifecycle.
+
+    ``DISCOVERED`` … ``TASK_REMOVED`` is the happy path; ``BLOCKED``,
+    ``FAILED`` and ``CANCELLED`` are side states.
+    """
+
+    DISCOVERED = "DISCOVERED"
+    NOTIFIED = "NOTIFIED"
+    ACCEPTED = "ACCEPTED"
+    SUBMITTED = "SUBMITTED"
+    DOWNLOADING = "DOWNLOADING"
+    DOWNLOADED = "DOWNLOADED"
+    ORGANIZING = "ORGANIZING"
+    ORGANIZED = "ORGANIZED"
+    TASK_REMOVED = "TASK_REMOVED"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class NotificationStatus(StrEnum):
+    """Spec 12.8 — notifications.status."""
+
+    PENDING = "pending"
+    SENT = "sent"
+    DELETED = "deleted"
+    FAILED = "failed"
+
+
+class GateReason(StrEnum):
+    """Spec 11.1 — the exact order of admission checks."""
+
+    ALLOWED = "allowed"
+    BLACKLISTED = "blacklisted"
+    ALREADY_ACCEPTED = "already_accepted"
+    INFO_HASH_IN_JOBS = "info_hash_in_jobs"
+    SOURCE_ITEM_ALREADY_PROCESSED = "source_item_already_processed"
+    INVALID_CANDIDATE = "invalid_candidate"
+
+
+class MoveStage(StrEnum):
+    """Stage names used when an organize attempt fails (spec 16.3)."""
+
+    VALIDATE = "validate"
+    CREATE_DIR = "create_dir"
+    RENAME = "rename"
+    COPY = "copy"
+    FSYNC = "fsync"
+    VERIFY = "verify"
+    CLEANUP = "cleanup"
