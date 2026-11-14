@@ -1,0 +1,41 @@
+# Docker Compose baseline — spec section 19.
+#
+# - one container, no published ports (Telegram uses long polling);
+# - ./config read-only, ./data writable (SQLite must stay on local disk);
+# - /downloads and /library bind-mounted from the NAS, shared with qBittorrent;
+# - non-root user from the image, no Docker socket, healthcheck + graceful stop.
+#
+# Copy .env.example to .env and config/example.yaml to config/config.yaml first.
+
+services:
+  app:
+    build:
+      context: .
+    image: fc2-harbor:latest
+    container_name: bt-automation
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Shanghai
+      FC2_CONFIG: /app/config/config.yaml
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - /mnt/storage/downloads:/downloads
+      - /mnt/storage/library:/library
+    ports: []
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    # Give the monitor time to finish an in-flight move and the bot to stop.
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
