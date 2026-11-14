@@ -13,6 +13,12 @@ app:
   health_host: 0.0.0.0
   health_port: 8080
 
+fc2:
+  # Digit width used to recognise an FC2 PPV number (spec 6.3 lists formats but
+  # not the width). Anything outside the range is not treated as a content id.
+  code_min_digits: 5
+  code_max_digits: 8
+
 telegram:
   # Subscription bot is delivered in M4; leave empty until then.
   subscription_bot_token: "${SUBSCRIPTION_BOT_TOKEN}"
@@ -27,8 +33,27 @@ nyaa:
   poll_interval_seconds: 180
   initial_lookback_hours: 24
   proxy: direct
+  # RSS first; the search page is the catch-up path when one round overflows
+  # the RSS window. Neither path may carry an uploader filter (spec 6.1).
+  rss_path: /?page=rss&q=FC2&c=0_0&f=0
+  search_path: /?f=0&c=0_0&q=FC2&p={page}
+  rss_page_size: 75
+  search_max_pages: 5
+  # Item ids remembered for the overlap re-check (ids, not pubDate).
+  overlap_item_ids: 200
+  # Trackers appended to magnets built from the RSS info hash.
+  trackers: []
+  user_agent: fc2-harbor/0.1 (+https://github.com/milikii/fc2-harbor)
+  timeout_seconds: 20
+  retries: 2
+  concurrency: 2
+  max_retry_after_seconds: 60
 
 provider:
+  # Spec 7.1 expects all nine providers enabled. Strict mode fails startup when
+  # one is disabled; set this to false only to switch a broken source off
+  # temporarily — that is logged and audited at startup.
+  strict_enabled: true
   # Fixed order, never reordered by hit rate (spec 7.1). Validated at startup.
   priorities:
     jav_fc2: [Fc2, fc2_hub, Javdb, Mmtv, freejavbt, miss_av, Javlibrary, avsox, Madou]
@@ -69,6 +94,8 @@ translation:
 
 download:
   default_downloader: qbittorrent
+  # Startup reconciliation stops resubmitting a job after this many attempts.
+  max_retries: 5
   routes:
     fc2: qbittorrent
     jav: qbittorrent

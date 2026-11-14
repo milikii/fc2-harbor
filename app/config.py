@@ -68,6 +68,14 @@ CANONICAL_PROVIDER_HOSTS: Mapping[str, str] = {
 }
 
 PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+#: The only environment overrides on top of the YAML file (env > yaml).
+#: Deliberately a short list: a general env layer would make nested-structure
+#: validation (fixed provider order, routes) hard to reason about.
+ENV_OVERRIDES: Mapping[str, tuple[str, ...]] = {
+    "FC2_LOG_LEVEL": ("app", "log_level"),
+    "FC2_DATABASE_URL": ("app", "database_url"),
+}
 _UNSAFE_URL_CHARS = re.compile(r"[\s]")
 
 
@@ -138,6 +146,35 @@ def expand_env_placeholders(
     missing: list[str] = []
     expanded = _expand_value(data, environment, missing, "")
     return expanded, sorted(set(missing))
+
+
+def apply_env_overrides(data: dict[str, Any], env: Mapping[str, str]) -> list[str]:
+    """Apply the small whitelist of env overrides onto the YAML mapping.
+
+    Returns the names of the variables that were actually applied, so startup can
+    log them (an override that silently changes behaviour is hard to debug).
+    """
+
+    applied: list[str] = []
+    for variable, path in ENV_OVERRIDES.items():
+        value = env.get(variable)
+        if not value:
+            continue
+        target: dict[str, Any] = data
+        for key in path[:-1]:
+            nested = target.get(key)
+            if not isinstance(nested, dict):
+                nested = {}
+                target[key] = nested
+            target = nested
+        target[path[-1]] = value
+        applied.append(variable)
+    return sorted(applied)
+
+
+def applied_env_overrides(env: Mapping[str, str] | None = None) -> list[str]:
+    environment = os.environ if env is None else env
+    return sorted(variable for variable in ENV_OVERRIDES if environment.get(variable))
 
 
 def load_yaml_file(path: Path) -> dict[str, Any]:
@@ -269,6 +306,26 @@ class TelegramSection(_FrozenModel):
         return value
 
 
+class Fc2Section(_FrozenModel):
+    """FC2 number recognition (spec 6.3).
+
+    The digit range is configuration, not a constant: the spec lists the formats
+    but not the width, so operators can widen it without a code change.
+    """
+
+    code_min_digits: int = Field(default=5, ge=3, le=9)
+    code_max_digits: int = Field(default=8, ge=3, le=12)
+
+    @model_validator(mode="after")
+    def _check_range(self) -> Fc2Section:
+        if self.code_min_digits > self.code_max_digits:
+            raise ValueError(
+                "fc2.code_min_digits must not exceed fc2.code_max_digits "
+                f"({self.code_min_digits} > {self.code_max_digits})"
+            )
+        return self
+
+
 class NyaaSection(_FrozenModel):
     base_url: str = "https://sukebei.nyaa.si"
     query: str = "FC2"
@@ -278,6 +335,23 @@ class NyaaSection(_FrozenModel):
     proxy: str = "direct"
     #: Random jitter added to every poll (spec 6.2).
     jitter_seconds: int = Field(default=20, ge=0, le=60)
+
+    #: RSS first (spec 6.2); the query must stay site-wide, never u=offkab.
+    rss_path: str = "/?page=rss&q=FC2&c=0_0&f=0"
+    #: Search page used to catch up when one round overflows the RSS window.
+    search_path: str = "/?f=0&c=0_0&q=FC2&p={page}"
+    rss_page_size: int = Field(default=75, ge=10, le=200)
+    search_max_pages: int = Field(default=5, ge=1, le=20)
+    #: How many item ids are remembered for the overlap re-check (spec 6.2).
+    overlap_item_ids: int = Field(default=200, ge=10, le=2000)
+    #: Trackers appended to magnets built from an RSS info hash.
+    trackers: list[str] = Field(default_factory=list)
+    user_agent: str = "fc2-harbor/0.1 (+https://github.com/milikii/fc2-harbor)"
+    timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    retries: int = Field(default=2, ge=0, le=5)
+    #: Per-domain concurrency (spec 6.2 / 8.3).
+    concurrency: int = Field(default=2, ge=1, le=4)
+    max_retry_after_seconds: float = Field(default=60.0, ge=0, le=600)
 
     @field_validator("base_url")
     @classmethod
@@ -289,6 +363,39 @@ class NyaaSection(_FrozenModel):
     def _check_query(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("nyaa.query must not be empty")
+        if "u=" in value:
+            raise ValueError(
+                "nyaa.query must stay site-wide; uploader filters such as u=offkab "
+                "are forbidden (spec 6.1)"
+            )
+        return value
+
+    @field_validator("rss_path")
+    @classmethod
+    def _check_rss_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("nyaa.rss_path must be an absolute site path")
+        if "u=" in value:
+            raise ValueError("nyaa.rss_path must not restrict the uploader (spec 6.1)")
+        return value
+
+    @field_validator("search_path")
+    @classmethod
+    def _check_search_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("nyaa.search_path must be an absolute site path")
+        if "{page}" not in value:
+            raise ValueError("nyaa.search_path must contain the {page} placeholder")
+        if "u=" in value:
+            raise ValueError("nyaa.search_path must not restrict the uploader (spec 6.1)")
+        return value
+
+    @field_validator("trackers")
+    @classmethod
+    def _check_trackers(cls, value: list[str]) -> list[str]:
+        for tracker in value:
+            if not tracker.startswith(("udp://", "http://", "https://")):
+                raise ValueError(f"invalid tracker url: {tracker!r}")
         return value
 
 
@@ -312,6 +419,10 @@ class ProviderSourceConfig(_FrozenModel):
 class ProviderSection(_FrozenModel):
     priorities: dict[str, list[str]]
     sources: dict[str, ProviderSourceConfig]
+    #: Spec 7.1 wants all nine enabled. Strict by default; an operator can
+    #: explicitly relax it to switch off one broken source, which is then
+    #: logged and audited at startup.
+    strict_enabled: bool = True
 
     @field_validator("priorities")
     @classmethod
@@ -332,10 +443,12 @@ class ProviderSection(_FrozenModel):
         missing = [name for name in CANONICAL_FC2_PROVIDER_ORDER if name not in self.sources]
         if missing:
             raise ValueError(f"provider.sources is missing entries: {missing}")
-        disabled = [name for name in CANONICAL_FC2_PROVIDER_ORDER if not self.sources[name].enabled]
-        if disabled:
+        disabled = self.disabled_providers()
+        if disabled and self.strict_enabled:
             raise ValueError(
-                f"all nine FC2 providers must stay enabled (spec 7.1), disabled: {disabled}"
+                f"all nine FC2 providers must stay enabled (spec 7.1), disabled: {disabled}; "
+                "set provider.strict_enabled=false only to switch a broken source off "
+                "temporarily (this is logged and audited at startup)"
             )
         mismatched = {
             name: (self.sources[name].host, CANONICAL_PROVIDER_HOSTS[name])
@@ -348,6 +461,11 @@ class ProviderSection(_FrozenModel):
                 "adapters are written against these hosts"
             )
         return self
+
+    def disabled_providers(self) -> list[str]:
+        """Canonical providers that are switched off, in priority order."""
+
+        return [name for name in CANONICAL_FC2_PROVIDER_ORDER if not self.sources[name].enabled]
 
 
 class ProxyProfile(_FrozenModel):
@@ -453,6 +571,10 @@ class TranslationSection(_FrozenModel):
 class DownloadSection(_FrozenModel):
     default_downloader: Literal["qbittorrent", "transmission"] = "qbittorrent"
     routes: dict[str, str] = Field(default_factory=lambda: dict.fromkeys(CATEGORIES, "qbittorrent"))
+    #: Automatic resubmission cap (startup reconciliation). A job that cannot be
+    #: submitted after this many attempts is marked FAILED and reported instead
+    #: of being retried forever.
+    max_retries: int = Field(default=5, ge=0, le=50)
 
     @field_validator("routes")
     @classmethod
@@ -604,6 +726,7 @@ class StorageSection(_FrozenModel):
 class Settings(_FrozenModel):
     app: AppSection = Field(default_factory=AppSection)
     telegram: TelegramSection
+    fc2: Fc2Section = Field(default_factory=Fc2Section)
     nyaa: NyaaSection = Field(default_factory=NyaaSection)
     provider: ProviderSection
     proxy_profiles: dict[str, ProxyProfile]
@@ -694,7 +817,9 @@ class Settings(_FrozenModel):
             candidate = (os.environ if env is None else env).get("FC2_CONFIG")
             path = Path(candidate) if candidate else Path("config/config.yaml")
         config_path = Path(path)
-        return cls.from_mapping(load_yaml_file(config_path), env=env)
+        data = load_yaml_file(config_path)
+        apply_env_overrides(data, os.environ if env is None else env)
+        return cls.from_mapping(data, env=env)
 
     # -- helpers ------------------------------------------------------------
 

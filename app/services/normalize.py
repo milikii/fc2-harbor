@@ -18,25 +18,70 @@ Rules
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from functools import lru_cache
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from app.db.enums import ContentType
 from app.schemas.release import MagnetInfo, NormalizedContent
 
-#: FC2 PPV identifiers in use are 5–8 digits. Kept as a named constant because
-#: it is the one heuristic in this module.
+#: Default FC2 PPV width. The real range is configuration
+#: (``fc2.code_min_digits`` / ``fc2.code_max_digits``); this is only the default
+#: used by tests and callers that do not load configuration.
 FC2_MIN_DIGITS = 5
 FC2_MAX_DIGITS = 8
 
 _SEP = r"[\s\-_.]*"
-_FC2_PPV_RE = re.compile(
-    rf"(?<![0-9A-Za-z])FC2{_SEP}PPV{_SEP}(\d{{{FC2_MIN_DIGITS},{FC2_MAX_DIGITS}}})(?![0-9A-Za-z])",
-    re.IGNORECASE,
-)
-_FC2_BARE_RE = re.compile(
-    rf"(?<![0-9A-Za-z])FC2{_SEP}(\d{{{FC2_MIN_DIGITS},{FC2_MAX_DIGITS}}})(?![0-9A-Za-z])",
-    re.IGNORECASE,
-)
+
+
+@lru_cache(maxsize=32)
+def _compile_fc2_patterns(
+    min_digits: int, max_digits: int
+) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    digits = rf"\d{{{min_digits},{max_digits}}}"
+    boundary = r"(?<![0-9A-Za-z])"
+    trailing = r"(?![0-9A-Za-z])"
+    ppv = re.compile(rf"{boundary}FC2{_SEP}PPV{_SEP}({digits}){trailing}", re.IGNORECASE)
+    bare = re.compile(rf"{boundary}FC2{_SEP}({digits}){trailing}", re.IGNORECASE)
+    return ppv, bare
+
+
+@dataclass(frozen=True, slots=True)
+class Fc2CodeRule:
+    """Digit range used when recognising an FC2 PPV number (spec 6.3)."""
+
+    min_digits: int = FC2_MIN_DIGITS
+    max_digits: int = FC2_MAX_DIGITS
+
+    def __post_init__(self) -> None:
+        if not 3 <= self.min_digits <= self.max_digits <= 12:
+            raise ValueError(
+                "invalid FC2 digit range: "
+                f"{self.min_digits}..{self.max_digits} (expected 3 <= min <= max <= 12)"
+            )
+
+    def normalize(self, text: str | None) -> NormalizedContent | None:
+        if not text:
+            return None
+        ppv_re, bare_re = _compile_fc2_patterns(self.min_digits, self.max_digits)
+        for pattern in (ppv_re, bare_re):
+            match = pattern.search(text)
+            if not match:
+                continue
+            number = match.group(1)
+            if int(number) == 0:
+                # "FC2-00000" is not a content id; refuse rather than invent one.
+                return None
+            return NormalizedContent(
+                content_type=ContentType.FC2,
+                canonical_key=canonical_fc2_key(number),
+                display_code=display_fc2_code(number),
+                matched_text=match.group(0),
+            )
+        return None
+
+
+DEFAULT_FC2_RULE = Fc2CodeRule()
 
 _HEX_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 _BASE32_HASH_RE = re.compile(r"^[A-Za-z2-7]{32}$")
@@ -64,30 +109,15 @@ def display_fc2_code(number: str) -> str:
     return f"FC2-PPV-{number}"
 
 
-def normalize_fc2(text: str | None) -> NormalizedContent | None:
+def normalize_fc2(
+    text: str | None, rule: Fc2CodeRule = DEFAULT_FC2_RULE
+) -> NormalizedContent | None:
     """Extract and normalise an FC2 PPV number from free text.
 
     Returns ``None`` when no reliable number is present.
     """
 
-    if not text:
-        return None
-
-    for pattern in (_FC2_PPV_RE, _FC2_BARE_RE):
-        match = pattern.search(text)
-        if not match:
-            continue
-        number = match.group(1)
-        if int(number) == 0:
-            # "FC2-00000" is not a content id; refuse rather than invent one.
-            return None
-        return NormalizedContent(
-            content_type=ContentType.FC2,
-            canonical_key=canonical_fc2_key(number),
-            display_code=display_fc2_code(number),
-            matched_text=match.group(0),
-        )
-    return None
+    return rule.normalize(text)
 
 
 def normalize_info_hash(value: str) -> str:
@@ -171,13 +201,17 @@ def generic_content_key(info_hash: str) -> str:
     return f"infohash:{normalize_info_hash(info_hash)}"
 
 
-def normalize_candidate(text: str | None, info_hash: str | None) -> NormalizedContent:
+def normalize_candidate(
+    text: str | None,
+    info_hash: str | None,
+    rule: Fc2CodeRule = DEFAULT_FC2_RULE,
+) -> NormalizedContent:
     """Normalise a manual submission into a content identity.
 
     FC2 numbers win; otherwise the info hash identifies the content (spec 10.6).
     """
 
-    fc2 = normalize_fc2(text)
+    fc2 = normalize_fc2(text, rule)
     if fc2 is not None:
         return fc2
     if not info_hash:
