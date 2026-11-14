@@ -242,6 +242,8 @@ class AppSection(_FrozenModel):
     database_url: str = "sqlite:////app/data/app.db"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = True
+    #: Rotating log file on the data volume (spec 19/24: logs must be backupable).
+    log_file: str | None = "/app/data/logs/app.log"
     # Bound inside the container network only; compose publishes no ports.
     health_host: str = "0.0.0.0"  # noqa: S104
     health_port: int = Field(default=8080, ge=1, le=65535)
@@ -254,6 +256,13 @@ class AppSection(_FrozenModel):
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"unknown timezone {value!r}") from exc
         return value
+
+    @field_validator("log_file")
+    @classmethod
+    def _check_log_file(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return _require_absolute_path(value, "app.log_file")
 
     @field_validator("database_url")
     @classmethod
@@ -376,7 +385,9 @@ class NyaaSection(_FrozenModel):
         if not value.startswith("/"):
             raise ValueError("nyaa.rss_path must be an absolute site path")
         if "u=" in value:
-            raise ValueError("nyaa.rss_path must not restrict the uploader (spec 6.1)")
+            raise ValueError(
+                "nyaa.rss_path must stay site-wide; uploader filters are forbidden (spec 6.1)"
+            )
         return value
 
     @field_validator("search_path")
@@ -387,7 +398,9 @@ class NyaaSection(_FrozenModel):
         if "{page}" not in value:
             raise ValueError("nyaa.search_path must contain the {page} placeholder")
         if "u=" in value:
-            raise ValueError("nyaa.search_path must not restrict the uploader (spec 6.1)")
+            raise ValueError(
+                "nyaa.search_path must stay site-wide; uploader filters are forbidden (spec 6.1)"
+            )
         return value
 
     @field_validator("trackers")
@@ -646,6 +659,20 @@ class TransmissionSection(_FrozenModel):
     username: str | None = None
     password: SecretStr | None = None
     timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    #: Remote path template, same contract as the qBittorrent one (spec 15).
+    save_path_template: str = "/downloads/{category}/{job_id}"
+
+    @field_validator("save_path_template")
+    @classmethod
+    def _check_template(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("downloaders.transmission.save_path_template must be absolute")
+        for token in ("{category}", "{job_id}"):
+            if token not in value:
+                raise ValueError(
+                    f"downloaders.transmission.save_path_template must contain {token}"
+                )
+        return value.rstrip("/")
 
     @model_validator(mode="after")
     def _check_enabled(self) -> TransmissionSection:

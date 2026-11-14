@@ -106,8 +106,15 @@ class JobSubmitter:
             retry_count=job.retry_count,
         )
 
-    def save_path_for(self, category: str, job_id: str) -> str:
-        template = self.settings.downloaders.qbittorrent.save_path_template
+    def save_path_for(
+        self, category: str, job_id: str, downloader: DownloaderName | None = None
+    ) -> str:
+        """Per-downloader save path (spec 14.1 / 15)."""
+
+        if downloader is DownloaderName.TRANSMISSION:
+            template = self.settings.downloaders.transmission.save_path_template
+        else:
+            template = self.settings.downloaders.qbittorrent.save_path_template
         return template.format(category=category, job_id=job_id)
 
     def tag_for(self, job_id: str) -> str:
@@ -146,7 +153,7 @@ class JobSubmitter:
             return S.FAILED
 
         downloader = self.registry.get(view.downloader)
-        save_path = self.save_path_for(view.category, view.id)
+        save_path = self.save_path_for(view.category, view.id, view.downloader)
         request = DownloadRequest(
             magnet=magnet,
             info_hash=info_hash,

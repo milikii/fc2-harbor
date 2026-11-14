@@ -13,6 +13,7 @@ from app.config import ConfigError, Settings
 from app.db.enums import DownloaderName
 from app.downloaders.base import Downloader
 from app.downloaders.qbittorrent import QBittorrentClient
+from app.downloaders.transmission import TransmissionClient
 from app.logging import get_logger
 
 _log = get_logger("downloader.registry")
@@ -40,10 +41,17 @@ class DownloaderRegistry:
                 verify_tls=config.verify_tls,
             )
         if settings.downloaders.transmission.enabled:
-            # Spec 15: the adapter is delivered in M5. Refuse to start rather
-            # than silently downloading nothing.
-            raise ConfigError(
-                "downloaders.transmission.enabled=true is not supported yet (delivered in M5)"
+            transmission = settings.downloaders.transmission
+            assert transmission.url  # validated by config
+            instances[DownloaderName.TRANSMISSION] = TransmissionClient(
+                base_url=transmission.url,
+                username=transmission.username,
+                password=(
+                    transmission.password.get_secret_value()
+                    if transmission.password is not None
+                    else None
+                ),
+                timeout_seconds=transmission.timeout_seconds,
             )
         registry = cls(instances)
         _log.info("downloader.registry.ready", downloaders=sorted(name.value for name in instances))
