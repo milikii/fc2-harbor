@@ -4,6 +4,14 @@
 
 格式：`条目 / 规格书位置 / 实现 / 理由`。
 
+## 规格书版本记录
+
+| 规格书版本 | 入库日期 | 说明 |
+|---|---|---|
+| v1.0 | 2026-11-14 | 从 `fc2-harbor-docs/BT_AUTOMATION_SPEC.md` 复制入库，共 1019 行 |
+
+约定：规格书更新时**直接覆盖**仓库内的 `docs/BT_AUTOMATION_SPEC.md`，并在上表追加一行版本号与日期，不静默替换。
+
 ---
 
 ## 1. 未使用 pydantic-settings
@@ -81,3 +89,16 @@
 - 规格书：§23 M2 范围不含卡片推送
 - 实现：M2 的轮询把候选写入 `contents` / `releases`（`DISCOVERED` 语义），推送在 M4 由「有 release、无 notification、未被 accepted」的内容驱动。
 - 理由：按里程碑顺序，避免半成品推送。
+
+## 13. Nyaa 条目 ID 统一抽数字
+
+- 规格书：§11.2 `releases(source, source_item_id)` 唯一
+- 问题：同一个种子在 RSS 里是 `https://sukebei.nyaa.si/download/4761220.torrent`，在搜索页里是 `https://sukebei.nyaa.si/view/4761220`。按「取路径最后一段」会得到 `4761220.torrent` 与 `4761220` 两个 ID，唯一约束和门禁第 4 步都拦不住，同一内容会被写两条 release（info hash 唯一索引会兜底成 IntegrityError，但不是设计路径）。
+- 实现：`item_id_from_url` 用正则只抽数字 ID，忽略 `view/`、`download/` 前缀与 `.torrent` 后缀；用例覆盖两种链接形式必须得到同一 ID。
+- 理由：item ID 是去重主键，必须与 URL 的展示形式无关。
+
+## 14. live 冒烟必须显式给代理
+
+- 规格书：§8.2「不依赖全局 HTTP_PROXY，使用应用内显式 HTTP 客户端」
+- 实现：`HttpClient` 保持 `trust_env=False`；live 测试从环境变量 `LIVE_PROXY_URL` 读代理，有值就构造 `http` proxy profile 传给 `NyaaSource`，没有就 skip。生产配置里对应 `proxy_profiles.<name>` + `nyaa.proxy`。
+- 理由：部署环境（NAS 与开发机）出网需要代理且 DNS 可能被污染；显式传参既满足 §8.2，又能在受限网络里跑真实页面校验。socks5h profile 依赖 `httpx[socks]`（已声明）。

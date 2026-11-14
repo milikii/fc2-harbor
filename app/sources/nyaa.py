@@ -21,6 +21,7 @@ Design notes
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -30,7 +31,7 @@ from urllib.parse import quote, urljoin, urlsplit
 from defusedxml import ElementTree as DefusedElementTree
 from selectolax.lexbor import LexborHTMLParser
 
-from app.config import Settings
+from app.config import ConfigError, Settings
 from app.logging import get_logger
 from app.network.clients import HttpClient, HttpError
 from app.schemas.release import NormalizedContent, ReleaseCandidate
@@ -93,14 +94,23 @@ def split_uploader(title: str) -> tuple[str | None, str]:
     return None, text
 
 
+#: Nyaa links come in several shapes for the same torrent:
+#: ``/view/4761220`` (search page, guid) and
+#: ``/download/4761220.torrent`` (RSS ``<link>``). The numeric id is the only
+#: stable identity, so it is extracted with a regex instead of taking the last
+#: path segment — otherwise one torrent would produce two source_item_ids and
+#: defeat ``releases(source, source_item_id)``.
+_ITEM_ID_RE = re.compile(r"(\d+)(?:\.torrent)?$")
+
+
 def item_id_from_url(link: str | None) -> str | None:
-    """``https://sukebei.nyaa.si/view/1234567`` -> ``1234567``."""
+    """``/view/1234567`` and ``/download/1234567.torrent`` -> ``1234567``."""
 
     if not link:
         return None
     path = urlsplit(link).path.rstrip("/")
-    candidate = path.rsplit("/", 1)[-1]
-    return candidate or None
+    match = _ITEM_ID_RE.search(path)
+    return match.group(1) if match else None
 
 
 def _localname(tag: str) -> str:
@@ -179,17 +189,18 @@ class NyaaRssParser:
 class NyaaSearchParser:
     """Parser for the HTML search page (spec 6.2 catch-up path).
 
-    Selectors are deliberately centralised: a markup change is fixed here and
-    covered by a new fixture.
+    The row layout is anchored on two stable facts instead of decorative CSS
+    classes: the name cell is the ``<td>`` that contains the ``/view/<id>`` link,
+    and the date cell carries ``data-timestamp``. Everything else is read by its
+    offset from those two cells (size before the date, seeders/leechers/downloads
+    after it). That survives class renames, which the real page has already done
+    once (there are no ``td-size`` / ``td-green`` helpers there).
     """
 
     TABLE = "table.torrent-list"
     ROW = "tbody tr"
     TITLE_LINK = "a[href*='/view/']"
     MAGNET_LINK = "a[href^='magnet:']"
-    SIZE_CELL = "td.td-size"
-    DATE_CELL = "td[data-timestamp]"
-    SEEDERS_CELL = "td.td-green"
     CATEGORY_LINK = "td a[href*='c=']"
 
     def parse(self, html: str, base_url: str) -> list[NyaaItem]:
@@ -212,21 +223,9 @@ class NyaaSearchParser:
             magnet_node = row.css_first(self.MAGNET_LINK)
             magnet = magnet_node.attributes.get("href") if magnet_node else None
             info_hash = _hash_from_magnet(magnet)
-
-            size_node = row.css_first(self.SIZE_CELL)
-            date_node = row.css_first(self.DATE_CELL)
-            seeders_node = row.css_first(self.SEEDERS_CELL)
             category_node = row.css_first(self.CATEGORY_LINK)
 
-            pub_date = None
-            if date_node is not None:
-                stamp = date_node.attributes.get("data-timestamp")
-                if stamp and stamp.isdigit():
-                    pub_date = datetime.fromtimestamp(int(stamp), tz=UTC)
-
-            seeders = None
-            if seeders_node is not None and seeders_node.text(strip=True).isdigit():
-                seeders = int(seeders_node.text(strip=True))
+            size_text, pub_date, seeders = self._read_number_cells(row.css("td"))
 
             uploader, clean_title = split_uploader(title_link.text(strip=True))
             items.append(
@@ -237,7 +236,7 @@ class NyaaSearchParser:
                     pub_date=pub_date,
                     info_hash=info_hash,
                     magnet=magnet,
-                    size_text=size_node.text(strip=True) if size_node else None,
+                    size_text=size_text,
                     category=(category_node.attributes.get("title") if category_node else None),
                     seeders=seeders,
                     uploader=uploader,
@@ -245,10 +244,50 @@ class NyaaSearchParser:
                         "href": href,
                         "magnet_present": bool(magnet),
                         "row_class": row.attributes.get("class"),
+                        "cells": len(row.css("td")),
                     },
                 )
             )
         return items
+
+    @staticmethod
+    def _read_number_cells(
+        cells: list[Any],
+    ) -> tuple[str | None, datetime | None, int | None]:
+        """Size / date / seeders, located relative to the name and date cells."""
+
+        name_index = None
+        for index, cell in enumerate(cells):
+            if cell.css_first("a[href*='/view/']") is not None:
+                name_index = index
+                break
+        if name_index is None:
+            return None, None, None
+
+        date_index = None
+        for index in range(name_index + 1, len(cells)):
+            if cells[index].attributes.get("data-timestamp"):
+                date_index = index
+                break
+        if date_index is None:
+            return None, None, None
+
+        pub_date = None
+        stamp = cells[date_index].attributes.get("data-timestamp") or ""
+        if stamp.isdigit():
+            pub_date = datetime.fromtimestamp(int(stamp), tz=UTC)
+
+        size_text = None
+        if date_index - 1 > name_index:
+            size_text = cells[date_index - 1].text(strip=True) or None
+
+        seeders = None
+        if date_index + 1 < len(cells):
+            seeders_text = cells[date_index + 1].text(strip=True)
+            if seeders_text.isdigit():
+                seeders = int(seeders_text)
+
+        return size_text, pub_date, seeders
 
 
 def _hash_from_magnet(magnet: str | None) -> str | None:
@@ -326,6 +365,21 @@ class NyaaCursor:
         )
 
 
+def resolve_proxy_url(settings: Settings, profile_name: str) -> str | None:
+    """Resolve a proxy profile to an httpx proxy URL (``None`` for direct).
+
+    Spec 8.2: routing is explicit per source, never ambient. A socks5h profile
+    needs ``httpx[socks]``, which is a declared dependency.
+    """
+
+    profile = settings.proxy_profiles.get(profile_name)
+    if profile is None:
+        raise ConfigError(f"unknown proxy profile {profile_name!r}")
+    if profile.type == "direct":
+        return None
+    return profile.url
+
+
 def _str_or_none(value: Any) -> str | None:
     return str(value) if value else None
 
@@ -356,6 +410,7 @@ class NyaaSource:
         self.settings = settings
         self.config = settings.nyaa
         self.rule = rule or Fc2CodeRule(settings.fc2.code_min_digits, settings.fc2.code_max_digits)
+        self.proxy_url = resolve_proxy_url(settings, self.config.proxy)
         self.rss_parser = NyaaRssParser()
         self.search_parser = NyaaSearchParser()
         self.client = client or HttpClient(
@@ -447,7 +502,7 @@ class NyaaSource:
             headers["If-Modified-Since"] = state.last_modified
 
         url = self.config.base_url.rstrip("/") + self.config.rss_path
-        response = await self.client.get(url, headers=headers)
+        response = await self.client.get(url, headers=headers, proxy_url=self.proxy_url)
         stats.pages_fetched += 1
         if response.not_modified:
             stats.not_modified = True
@@ -483,7 +538,7 @@ class NyaaSource:
         path = self.config.search_path.format(page=page)
         url = self.config.base_url.rstrip("/") + path
         self.last_stats.pages_fetched += 1
-        response = await self.client.get(url)
+        response = await self.client.get(url, proxy_url=self.proxy_url)
         return self.search_parser.parse(response.text, self.config.base_url)
 
     # -- mapping ------------------------------------------------------------

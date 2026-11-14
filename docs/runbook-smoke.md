@@ -63,6 +63,13 @@ docker compose exec app curl -fsS http://127.0.0.1:8080/status
 
 ## 3. 订阅冒烟（M2 核心）
 
+> 如果 NAS 出网需要代理：在 `config/config.yaml` 里把 `nyaa.proxy` 指向一个
+> `http`/`socks5h` profile（socks5h 已内置 `httpx[socks]`），不要依赖容器环境里的
+> `HTTP_PROXY`——应用按规格 §8.2 显式路由，`trust_env=False`。
+>
+> 想在本机先验证解析器：`LIVE_PROXY_URL=http://<proxy>:7890 .venv/bin/pytest tests/live --run-live`。
+> 没有 `LIVE_PROXY_URL` 时 live 用例自动 skip。
+
 - 等一轮（默认 180 秒 + 0～20 秒抖动）。日志出现 `subscription.round`，首次启动应满足 `fetched > 0`、`recorded > 0`（首次回看 24 小时）。
 - 再等一轮，若出现 `nyaa.not_modified`，说明 ETag/Last-Modified 生效。
 - `curl -s http://127.0.0.1:8080/status`（容器内）确认 `contents` 增长。

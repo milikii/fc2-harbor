@@ -88,7 +88,7 @@ def test_search_page_parses_rows_and_magnet() -> None:
     assert first.size_text == "1.2 GiB"
     assert first.seeders == 12
     assert first.category == "Art - Anime"
-    assert first.pub_date == datetime.fromtimestamp(1763114400, tz=UTC)
+    assert first.pub_date == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
 
     # Second row has no magnet link; the hash stays unknown here.
     assert items[1].magnet is None
@@ -119,6 +119,60 @@ def test_item_id_from_url() -> None:
     assert item_id_from_url("https://sukebei.nyaa.si/view/1234567") == "1234567"
     assert item_id_from_url("https://sukebei.nyaa.si/view/1234567/") == "1234567"
     assert item_id_from_url(None) is None
+    assert item_id_from_url("https://sukebei.nyaa.si/") is None
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://sukebei.nyaa.si/view/4761220",
+        "https://sukebei.nyaa.si/view/4761220/",
+        "https://sukebei.nyaa.si/download/4761220.torrent",
+        "https://sukebei.nyaa.si/download/4761220.torrent?foo=bar",
+    ],
+)
+def test_view_and_download_links_share_one_item_id(link: str) -> None:
+    """Regression: RSS uses /download/<id>.torrent, the search page /view/<id>.
+
+    Both must yield the same ``source_item_id``, otherwise one torrent produces
+    two release rows and the (source, source_item_id) unique constraint misses it.
+    """
+
+    assert item_id_from_url(link) == "4761220"
+
+
+def test_rss_and_search_parse_the_same_torrent_to_one_id() -> None:
+    rss_item = NyaaRssParser().parse(
+        b'<?xml version="1.0"?><rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">'
+        b"<channel><title>t</title><item>"
+        b"<title>FC2-PPV-4761220 Same Torrent</title>"
+        b"<link>https://sukebei.nyaa.si/download/4761220.torrent</link>"
+        b"<nyaa:infoHash>cccccccccccccccccccccccccccccccccccccccc</nyaa:infoHash>"
+        b"</item></channel></rss>"
+    )[0]
+    search_item = NyaaSearchParser().parse(
+        (FIXTURES / "search_page_realistic.html").read_text(),
+        "https://sukebei.nyaa.si",
+    )[0]
+
+    assert rss_item.item_id == search_item.item_id == "4761220"
+    assert rss_item.info_hash == search_item.info_hash
+
+
+def test_realistic_search_markup_still_yields_size_and_seeders() -> None:
+    """The real page has no td-size / td-green classes; offsets must work."""
+
+    items = NyaaSearchParser().parse(
+        (FIXTURES / "search_page_realistic.html").read_text(),
+        "https://sukebei.nyaa.si",
+    )
+
+    assert [item.item_id for item in items] == ["4761220", "4761221"]
+    assert items[0].size_text == "3.4 GiB"
+    assert items[0].seeders == 27
+    assert items[0].pub_date == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    assert items[1].size_text == "900.0 MiB"
+    assert items[1].seeders == 5
 
 
 def test_parse_http_date() -> None:
