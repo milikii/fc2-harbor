@@ -106,6 +106,7 @@ class MetadataService:
         settings: Settings,
         router: ProxyRouter,
         translator: OpenAITranslator | None = None,
+        metrics: object | None = None,
     ) -> None:
         self.db = db
         self.coordinator = coordinator
@@ -113,6 +114,7 @@ class MetadataService:
         self.settings = settings
         self.router = router
         self.translator = translator
+        self.metrics = metrics
 
     async def enrich(self, content_id: str) -> EnrichmentResult:
         content, release = await self._load(content_id)
@@ -282,6 +284,8 @@ class MetadataService:
                 url, proxy_url=proxy.url, referer=referer
             )
         except ImageFetchError as exc:
+            if self.metrics is not None:
+                self.metrics.inc("images.rejected")  # type: ignore[attr-defined]
             _log.warning(
                 "metadata.image_rejected",
                 content_id=content_id,
@@ -328,6 +332,8 @@ class MetadataService:
         try:
             translated = await self.translator.translate(description)
         except TranslationError as exc:
+            if self.metrics is not None:
+                self.metrics.inc("translations.failed")  # type: ignore[attr-defined]
             _log.warning("metadata.translate_failed", content_id=content_id, error_code=exc.code)
             return None
         if not translated:

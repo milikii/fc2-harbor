@@ -57,6 +57,7 @@ class Publisher:
         bot: object,
         settings: Settings,
         bot_name: str = "subscription",
+        metrics: object | None = None,
     ) -> None:
         self.db = db
         self.metadata = metadata
@@ -64,6 +65,7 @@ class Publisher:
         self.bot = bot
         self.settings = settings
         self.bot_name = bot_name
+        self.metrics = metrics
 
     # -- public API ---------------------------------------------------------
 
@@ -78,14 +80,18 @@ class Publisher:
             except Exception as exc:
                 report.failed += 1
                 report.errors.append(f"{candidate.content_id}: {type(exc).__name__}")
+                self._count("cards.failed")
                 _log.exception("publisher.card_failed", content_id=candidate.content_id)
                 continue
             if outcome == "skipped":
                 report.skipped += 1
+                self._count("cards.skipped")
             elif outcome == "resumed":
                 report.resumed += 1
+                self._count("cards.resumed")
             else:
                 report.published += 1
+                self._count("cards.published")
 
         if candidates:
             _log.info(
@@ -117,6 +123,10 @@ class Publisher:
         if any(outcome == "resumed" for outcome in outcomes):
             return "resumed"
         return "published"
+
+    def _count(self, name: str) -> None:
+        if self.metrics is not None:
+            self.metrics.inc(name)  # type: ignore[attr-defined]
 
     # -- per chat -----------------------------------------------------------
 

@@ -111,10 +111,12 @@ class MetadataCoordinator:
         providers: Sequence[BaseProvider],
         settings: Settings,
         nyaa_fallback: NyaaFallbackProvider | None = None,
+        metrics: object | None = None,
     ) -> None:
         self.providers = list(providers)
         self.settings = settings
         self.nyaa_fallback = nyaa_fallback
+        self.metrics = metrics
         self._failures: dict[str, int] = {}
 
     async def aggregate(
@@ -191,6 +193,11 @@ class MetadataCoordinator:
                 self._failures[provider.id] = 0
             else:
                 self._note_failure(provider.id, exc.code)
+            self._record_metric(
+                provider.id,
+                "miss" if miss else ("structure" if exc.code == "structure_changed" else "error"),
+                latency,
+            )
             return
         except TimeoutError:
             latency = int((time.monotonic() - started) * 1000)
@@ -206,11 +213,13 @@ class MetadataCoordinator:
                 )
             )
             self._note_failure(provider.id, "timeout")
+            self._record_metric(provider.id, "error", latency)
             return
 
         latency = int((time.monotonic() - started) * 1000)
         self._failures[provider.id] = 0
         self._merge(aggregated, result, limit)
+        self._record_metric(provider.id, "hit", latency)
         aggregated.runs.append(
             ProviderRun(
                 provider=provider.id,
@@ -256,6 +265,7 @@ class MetadataCoordinator:
             return
         # Never overwrites: the fallback only fills what is still missing.
         self._merge(aggregated, result, limit)
+        self._record_metric("Nyaa", "hit", 0)
         aggregated.runs.append(
             ProviderRun(
                 provider="Nyaa",
@@ -328,6 +338,10 @@ class MetadataCoordinator:
     def health(self) -> dict[str, int]:
         return dict(self._failures)
 
+    def _record_metric(self, provider: str, outcome: str, latency_ms: int) -> None:
+        if self.metrics is not None:
+            self.metrics.record_provider(provider, outcome, latency_ms=latency_ms)  # type: ignore[attr-defined]
+
 
 def _result_json(result: MetadataResult) -> dict[str, object]:
     return {
@@ -354,11 +368,13 @@ def build_providers(
             _log.warning("metadata.provider_disabled", provider=name)
             continue
         provider_class = PROVIDER_CLASSES[name]
+        target = router.for_provider(source.proxy)
         providers.append(
             provider_class(
                 client=client,
-                proxy_url=router.for_provider(source.proxy).url,
+                proxy_url=target.url,
                 timeout_seconds=source.timeout_seconds,
+                proxy_region=target.region,
             )
         )
 

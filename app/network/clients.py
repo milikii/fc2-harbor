@@ -129,6 +129,7 @@ class HttpClient:
         max_retry_after_seconds: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
         sleeper: Any = None,
+        metrics: Any = None,
     ) -> None:
         self._user_agent = user_agent
         self._timeout = httpx.Timeout(timeout_seconds)
@@ -137,6 +138,7 @@ class HttpClient:
         self._max_retry_after = max_retry_after_seconds
         self._transport = transport
         self._sleep = sleeper or asyncio.sleep
+        self._metrics = metrics
         self._clients: dict[str | None, httpx.AsyncClient] = {}
 
     # -- lifecycle ----------------------------------------------------------
@@ -170,6 +172,8 @@ class HttpClient:
         *,
         headers: Mapping[str, str] | None = None,
         proxy_url: str | None = None,
+        proxy_label: str | None = None,
+        proxy_region: str | None = None,
     ) -> HttpResponse:
         """GET with retries. Only GET is supported: it is the only idempotent verb."""
 
@@ -185,6 +189,14 @@ class HttpClient:
                     )
             except httpx.HTTPError as exc:
                 last_error = exc
+                if self._metrics is not None and proxy_label:
+                    self._metrics.record_proxy(
+                        proxy_label,
+                        region=proxy_region,
+                        ok=False,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        error=type(exc).__name__,
+                    )
                 _log.warning(
                     "http.request_failed",
                     domain=domain,
@@ -200,6 +212,14 @@ class HttpClient:
                 ) from exc
 
             latency_ms = int((time.monotonic() - started) * 1000)
+            if self._metrics is not None and proxy_label:
+                self._metrics.record_proxy(
+                    proxy_label,
+                    region=proxy_region,
+                    ok=response.status_code < 500,
+                    latency_ms=latency_ms,
+                    error=None if response.status_code < 500 else f"http_{response.status_code}",
+                )
             _log.info(
                 "http.request",
                 domain=domain,
