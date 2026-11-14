@@ -103,6 +103,16 @@ def test_spec_is_versioned_in_the_repository() -> None:
     assert "## 23. 分阶段开发顺序" in text
 
 
+def test_backup_script_is_executable_and_uses_the_sqlite_backup_api() -> None:
+    script = ROOT / "scripts" / "backup.sh"
+    assert script.exists()
+    assert script.stat().st_mode & 0o111
+    text = script.read_text(encoding="utf-8")
+    assert "src.backup(dst)" in text  # online backup, not a raw file copy
+    assert "config-" in text and "tar" in text
+    assert "head -n -14" in text  # keeps the last 14 archives
+
+
 def test_decision_log_and_runbook_exist() -> None:
     deviations = ROOT / "docs" / "deviations.md"
     runbook = ROOT / "docs" / "runbook-smoke.md"
