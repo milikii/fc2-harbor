@@ -28,6 +28,10 @@ _log = get_logger("bot.manual.commands")
 HELP_TEXT = """可用命令：
 /status — 运行状态与最近失败
 /retry <job_id> — 重试原下载任务
+/block <编号> — 加入黑名单
+/unblock <编号> — 解除黑名单（已接受记录保留）
+/pause、/resume — 暂停/恢复订阅轮询
+/providers — provider 健康与命中率
 直接发送 magnet 链接即可投递（FC2 编号自动识别，其余需选分类）。"""
 
 
@@ -63,6 +67,8 @@ def build_commands_router(
     db: Database,
     submitter: JobSubmitter,
     allowed_user_ids: Iterable[int],
+    admin: object | None = None,
+    state: object | None = None,
 ) -> Router:
     router = Router(name="manual-commands")
     router.message.filter(WhitelistFilter(allowed_user_ids))
@@ -93,6 +99,53 @@ def build_commands_router(
             await message.answer(f"找不到任务 {job_id}")
             return
         await message.answer(f"任务 {job_id} 已重试，当前状态：{status.value}")
+
+    @router.message(Command("block"))
+    async def handle_block(message: Message) -> None:
+        if admin is None:
+            await message.answer("管理命令未启用。")
+            return
+        code = (message.text or "").split(maxsplit=1)
+        if len(code) < 2:
+            await message.answer("用法：/block FC2-PPV-1234567")
+            return
+        actor = f"telegram:{message.from_user.id if message.from_user else 0}"
+        await message.answer(await admin.block(code[1], actor=actor))  # type: ignore[attr-defined]
+
+    @router.message(Command("unblock"))
+    async def handle_unblock(message: Message) -> None:
+        if admin is None:
+            await message.answer("管理命令未启用。")
+            return
+        code = (message.text or "").split(maxsplit=1)
+        if len(code) < 2:
+            await message.answer("用法：/unblock FC2-PPV-1234567")
+            return
+        actor = f"telegram:{message.from_user.id if message.from_user else 0}"
+        await message.answer(await admin.unblock(code[1], actor=actor))  # type: ignore[attr-defined]
+
+    @router.message(Command("pause"))
+    async def handle_pause(message: Message) -> None:
+        if state is None:
+            await message.answer("运行状态未启用。")
+            return
+        changed = state.pause()  # type: ignore[attr-defined]
+        await message.answer("已暂停订阅轮询。" if changed else "订阅轮询已经是暂停状态。")
+
+    @router.message(Command("resume"))
+    async def handle_resume(message: Message) -> None:
+        if state is None:
+            await message.answer("运行状态未启用。")
+            return
+        changed = state.resume()  # type: ignore[attr-defined]
+        await message.answer("已恢复订阅轮询。" if changed else "订阅轮询本来就在运行。")
+
+    @router.message(Command("providers"))
+    async def handle_providers(message: Message) -> None:
+        if admin is None:
+            await message.answer("管理命令未启用。")
+            return
+        await message.answer(admin.providers_report())  # type: ignore[attr-defined]
 
     @router.message(F.text.startswith("/"))
     async def handle_unknown(message: Message) -> None:

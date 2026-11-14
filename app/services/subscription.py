@@ -62,12 +62,14 @@ class SubscriptionPoller:
         registrar: ReleaseRegistrar,
         settings: Settings,
         rng: random.Random | None = None,
+        state: object | None = None,
     ) -> None:
         self.db = db
         self.source = source
         self.registrar = registrar
         self.settings = settings
         self._rng = rng or random.Random()  # noqa: S311 - poll jitter, not crypto
+        self.state = state
 
     # -- one round ----------------------------------------------------------
 
@@ -180,6 +182,13 @@ class SubscriptionPoller:
             jitter_seconds=jitter,
         )
         while not stop_event.is_set():
+            if self.state is not None and getattr(self.state, "paused", False):
+                _log.info("subscription.paused", source=self.source.name)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+                continue
             try:
                 await self.poll_once()
             except Exception:

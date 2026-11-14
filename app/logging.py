@@ -22,6 +22,7 @@ import logging
 import re
 from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -87,11 +88,49 @@ def _add_log_level(
     return event_dict
 
 
+class _FileSink:
+    """Mirror redacted records into a rotating file under /app/data/logs.
+
+    Docker's json-file driver already keeps stdout, but the spec asks for logs that
+    live on a volume and can be backed up (spec 19 / 24), so the same redacted JSON
+    line is also appended to a rotating file.
+    """
+
+    def __init__(
+        self, path: str | Path, *, max_bytes: int = 10 * 1024 * 1024, backups: int = 3
+    ) -> None:
+        import logging.handlers
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._logger = logging.getLogger("fc2_harbor.file_sink")
+        self._logger.setLevel(logging.INFO)
+        self._logger.propagate = False
+        if not self._logger.handlers:
+            handler = logging.handlers.RotatingFileHandler(
+                target, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            self._logger.addHandler(handler)
+
+    def __call__(
+        self, _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        import json
+
+        # Redact again on the way to disk: the file must stay safe even if the
+        # processor order ever changes.
+        safe = redact_processor(None, "", dict(event_dict))
+        self._logger.info(json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str))
+        return event_dict
+
+
 def configure_logging(
     *,
     level: str = "INFO",
     json_logs: bool = True,
     logger_name: str = "fc2_harbor",
+    log_file: str | Path | None = None,
 ) -> None:
     """Configure structlog once at process start."""
 
@@ -106,6 +145,9 @@ def configure_logging(
         structlog.processors.format_exc_info,
         redact_processor,
     ]
+    if log_file:
+        shared_processors.append(_FileSink(log_file))
+
     renderer: Any = (
         structlog.processors.JSONRenderer(sort_keys=True)
         if json_logs

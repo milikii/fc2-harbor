@@ -66,6 +66,19 @@ def test_long_values_are_truncated_not_dropped() -> None:
     assert len(event["magnet"]) < len(magnet)
 
 
+def test_file_sink_writes_redacted_json(tmp_path) -> None:
+    from app.logging import _FileSink
+
+    target = tmp_path / "logs" / "app.log"
+    sink = _FileSink(target)
+    sink(None, "info", {"event": "login", "bot_token": "secret", "canonical_key": "fc2_ppv:1"})
+
+    line = target.read_text(encoding="utf-8").strip()
+    assert "fc2_ppv:1" in line
+    assert "secret" not in line
+    assert line.startswith("{")
+
+
 def test_regular_fields_pass_through() -> None:
     event = _process(
         {

@@ -36,14 +36,18 @@ from app.organizer.monitor import DownloadMonitor, reconcile_startup, run_monito
 from app.organizer.mover import Organizer
 from app.providers.coordinator import MetadataCoordinator, build_providers
 from app.services.acceptance import SubscriptionActions
+from app.services.admin import AdminService
 from app.services.gate import ContentGate
 from app.services.jobs import JobSubmitter
 from app.services.manual_ingest import ManualIngestService
 from app.services.metadata import MetadataService, build_translator, derive_image_allowlist
+from app.services.metrics import Metrics
+from app.services.normalize import Fc2CodeRule
 from app.services.notifications import MessageDeleter
 from app.services.notify import TelegramAdminNotifier
 from app.services.publisher import Publisher, run_publisher_loop
 from app.services.releases import ReleaseRegistrar
+from app.services.runtime import RuntimeState
 from app.services.state import record_event
 from app.services.subscription import SubscriptionPoller
 from app.services.telegram_assets import TelegramAssetUploader
@@ -53,7 +57,11 @@ _log = get_logger("main")
 
 
 async def run(settings: Settings) -> None:
-    configure_logging(level=settings.app.log_level, json_logs=settings.app.log_json)
+    configure_logging(
+        level=settings.app.log_level,
+        json_logs=settings.app.log_json,
+        log_file=settings.app.log_file,
+    )
     _log.info(
         "app.starting",
         timezone=settings.app.timezone,
@@ -69,6 +77,8 @@ async def run(settings: Settings) -> None:
         )
 
     db = Database(settings.app.database_url)
+    metrics = Metrics()
+    runtime = RuntimeState()
     registry = DownloaderRegistry.from_settings(settings)
     nyaa_source: NyaaSource | None = None
     http_client: HttpClient | None = None
@@ -108,11 +118,12 @@ async def run(settings: Settings) -> None:
         nyaa_source = NyaaSource(settings=settings)
         registrar = ReleaseRegistrar(db=db, gate=gate)
         poller = SubscriptionPoller(
-            db=db, source=nyaa_source, registrar=registrar, settings=settings
+            db=db, source=nyaa_source, registrar=registrar, settings=settings, state=runtime
         )
 
         proxy_router = ProxyRouter(settings.proxy_profiles)
         http_client = HttpClient(
+            metrics=metrics,
             user_agent=settings.nyaa.user_agent,
             timeout_seconds=settings.nyaa.timeout_seconds,
             retries=settings.nyaa.retries,
@@ -121,7 +132,7 @@ async def run(settings: Settings) -> None:
         )
         providers, fallback = build_providers(settings, client=http_client, router=proxy_router)
         coordinator = MetadataCoordinator(
-            providers=providers, settings=settings, nyaa_fallback=fallback
+            providers=providers, settings=settings, nyaa_fallback=fallback, metrics=metrics
         )
         image_fetcher = ImageFetcher(
             cache_dir=Path(settings.image_fetch.cache_dir),
@@ -137,6 +148,13 @@ async def run(settings: Settings) -> None:
             settings=settings,
             router=proxy_router,
             translator=translator,
+            metrics=metrics,
+        )
+
+        admin = AdminService(
+            db=db,
+            metrics=metrics,
+            rule=Fc2CodeRule(settings.fc2.code_min_digits, settings.fc2.code_max_digits),
         )
 
         dispatcher = Dispatcher()
@@ -155,6 +173,7 @@ async def run(settings: Settings) -> None:
                 uploader=uploader,
                 bot=subscription_bot,
                 settings=settings,
+                metrics=metrics,
             )
             deleter = MessageDeleter(db=db, bot=subscription_bot)
             dispatcher.include_router(
@@ -181,6 +200,8 @@ async def run(settings: Settings) -> None:
                 db=db,
                 submitter=submitter,
                 allowed_user_ids=settings.telegram.allowed_user_ids,
+                admin=admin,
+                state=runtime,
             )
         )
         dispatcher.include_router(
@@ -191,7 +212,7 @@ async def run(settings: Settings) -> None:
             )
         )
 
-        health_app = create_health_app(db=db, settings=settings)
+        health_app = create_health_app(db=db, settings=settings, metrics=metrics)
         server = uvicorn.Server(
             uvicorn.Config(
                 health_app,
