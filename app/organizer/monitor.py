@@ -33,6 +33,7 @@ from app.organizer.mover import OrganizeError, Organizer
 from app.organizer.paths import PathMapper, PathMappingError, build_directory
 from app.organizer.stability import StabilityTracker
 from app.schemas.download import DownloadHandle, evaluate_completion
+from app.services.jobs import JobSubmitter
 from app.services.notify import AdminNotifier
 from app.services.state import (
     IN_FLIGHT,
@@ -476,18 +477,22 @@ class DownloadMonitor:
 async def reconcile_startup(
     *,
     db: Database,
-    submitter: object,
+    submitter: JobSubmitter,
     settings: Settings,
+    notifier: AdminNotifier | None = None,
 ) -> dict[str, int]:
     """Scan unfinished jobs at container start (spec 13).
 
     ``ACCEPTED`` jobs are (re)submitted — this covers a crash between the gate
-    transaction and the downloader call. Everything else is left to the monitor,
+    transaction and the downloader call. Each attempt increments ``retry_count``;
+    once ``download.max_retries`` is reached the job is marked FAILED and reported
+    instead of being retried forever. Everything else is left to the monitor,
     which reconciles each job against qBittorrent on the next tick.
     """
 
     summary = {
         "accepted_resubmitted": 0,
+        "accepted_abandoned": 0,
         "in_flight": 0,
         "organize_pending": 0,
         "organized_waiting_removal": 0,
@@ -518,11 +523,29 @@ async def reconcile_startup(
         elif status_value is S.FAILED:
             summary["failed"] += int(count)
 
-    submit = getattr(submitter, "submit", None)
-    if callable(submit):
-        for job_id in accepted_ids:
-            await submit(job_id)
-            summary["accepted_resubmitted"] += 1
+    max_retries = settings.download.max_retries
+    for job_id in accepted_ids:
+        view = await submitter.load(job_id)
+        if view is None:
+            continue
+        if view.retry_count >= max_retries:
+            await _abandon_job(db, job_id, view.retry_count, max_retries)
+            summary["accepted_abandoned"] += 1
+            if notifier is not None:
+                await notifier.notify(
+                    f"任务 {job_id} 连续 {view.retry_count} 次投递失败，已标记 FAILED，"
+                    "请检查下载器后手动 /retry。"
+                )
+            continue
+        await submitter.submit(job_id, count_attempt=True)
+        summary["accepted_resubmitted"] += 1
+
+    if summary["accepted_abandoned"]:
+        _log.error(
+            "monitor.reconcile_abandoned",
+            jobs=summary["accepted_abandoned"],
+            max_retries=max_retries,
+        )
 
     _log.info(
         "monitor.reconcile",
@@ -530,6 +553,27 @@ async def reconcile_startup(
         downloader_default=settings.download.default_downloader,
     )
     return summary
+
+
+async def _abandon_job(db: Database, job_id: str, retry_count: int, max_retries: int) -> None:
+    """Give up on a job that cannot be submitted (bounded retries)."""
+
+    try:
+        async with db.transaction() as session:
+            await transition_job(
+                session,
+                job_id,
+                S.FAILED,
+                expected_status=S.ACCEPTED,
+                error_code="max_retries_exceeded",
+                error_message=(
+                    f"automatic submission gave up after {retry_count} attempts "
+                    f"(limit {max_retries})"
+                ),
+                actor="system",
+            )
+    except StaleTransitionError:
+        _log.info("monitor.abandon_stale", job_id=job_id)
 
 
 async def run_monitor_loop(

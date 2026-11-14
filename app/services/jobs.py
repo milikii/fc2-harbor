@@ -57,6 +57,7 @@ class JobView:
     submitted_at: datetime | None
     completed_at: datetime | None
     organized_at: datetime | None
+    retry_count: int = 0
 
 
 def job_stage(view: JobView) -> str:
@@ -102,6 +103,7 @@ class JobSubmitter:
             submitted_at=job.submitted_at,
             completed_at=job.completed_at,
             organized_at=job.organized_at,
+            retry_count=job.retry_count,
         )
 
     def save_path_for(self, category: str, job_id: str) -> str:
@@ -111,7 +113,13 @@ class JobSubmitter:
     def tag_for(self, job_id: str) -> str:
         return f"{self.settings.downloaders.qbittorrent.tag_prefix}-{job_id}"
 
-    async def submit(self, job_id: str, *, allow_retry: bool = False) -> DownloadStatus:
+    async def submit(
+        self,
+        job_id: str,
+        *,
+        allow_retry: bool = False,
+        count_attempt: bool = False,
+    ) -> DownloadStatus:
         view = await self.load(job_id)
         if view is None:
             raise JobNotFoundError(f"download job {job_id} not found")
@@ -175,6 +183,7 @@ class JobSubmitter:
                     },
                     actor="system",
                     reason="submitted to downloader",
+                    increment_retry=count_attempt,
                 )
         except StaleTransitionError:
             # Another task advanced the job while we were talking to qB. The
