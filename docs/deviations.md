@@ -102,3 +102,33 @@
 - 规格书：§8.2「不依赖全局 HTTP_PROXY，使用应用内显式 HTTP 客户端」
 - 实现：`HttpClient` 保持 `trust_env=False`；live 测试从环境变量 `LIVE_PROXY_URL` 读代理，有值就构造 `http` proxy profile 传给 `NyaaSource`，没有就 skip。生产配置里对应 `proxy_profiles.<name>` + `nyaa.proxy`。
 - 理由：部署环境（NAS 与开发机）出网需要代理且 DNS 可能被污染；显式传参既满足 §8.2，又能在受限网络里跑真实页面校验。socks5h profile 依赖 `httpx[socks]`（已声明）。
+
+## 15. 图片域名 allowlist 默认按注册域派生
+
+- 规格书：§20「图片和页面 URL 需要域名 allowlist」
+- 实现：`image_fetch.allowed_hosts` 显式配置时严格按它（含子域）；未配置时按「各 provider 主机、Nyaa 主机、cdn_routes 的注册域（eTLD+1 启发式）」派生，例如 `adult.contents.fc2.com` → `fc2.com`，因此 `storage201000.contents.fc2.com` 这类真实 CDN 可通。
+- 理由：九个 provider 的 CDN 域名各不相同且会变；用注册域派生既拦住无关主机，又不至于让图片全被 allowlist 误杀。真正的 SSRF 防线是「解析结果必须是公网地址 + 每一跳重定向都重新校验」，不依赖 allowlist 单独承担。
+
+## 16. 图片缓存目录进配置
+
+- 规格书：§19 要求 `/app/data` 持久化
+- 实现：新增 `image_fetch.cache_dir`，默认 `/app/data/cache/images`，内容寻址（`<sha256[:2]>/<sha256>.<ext>`），原子写入。
+- 理由：规格书没写缓存路径；放在 `/app/data` 下才能随 compose 的卷持久化并被备份脚本覆盖。
+
+## 17. 翻译默认开启，缺凭据启动失败
+
+- 规格书：§2.1 中文翻译属于必须实现；§18 示例 `translation.enabled: true`
+- 实现：示例配置 `enabled: true`，缺 `base_url`/`api_key`/`model` 直接启动失败；没有翻译端点时显式设 false。
+- 理由：翻译是必须项，默认开启并在缺配置时快速失败，比默默不翻译好；运行期翻译失败只记日志，不影响卡片。
+
+## 18. FC2 官方 provider 的标题来源
+
+- 规格书：§7.4 独立 selector
+- 实现：优先 `meta[property="og:title"]`（真实页面有），去掉前缀番号；不使用站点通用的 `h1`/`h2` 兜底（真实页面里它们是「コンテンツマーケット」「サービス情報」）。
+- 理由：用真实页面验证时发现通用标签会抓到站点导航文字，必须显式排除。图片 src 在真实页面是协议相对（`//cdn/…`），统一按页面 URL 补全。
+
+## 19. 其余八个 provider 的 selector 未经线上验证
+
+- 规格书：§7.4「线上结构变化时标记 provider 不健康」
+- 现状：构建环境访问 javdb（Cloudflare 验证码）、javlibrary（403）、miss_av（403）、avsox（JS 挑战）均不可用；这些适配器按站点常见结构实现，fixture 为构造样本。`fc2` 已用真实页面验证。
+- 处理：解析不到锚点一律抛 `ProviderError("structure_changed")`，不会伪造成功；协调器连续失败 3 次记 `metadata.provider_unhealthy` 警告。运维首次真实运行时按 `docs/runbook-smoke.md` 看日志确认，结构不符就补新 fixture 修 selector。

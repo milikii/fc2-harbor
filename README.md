@@ -15,7 +15,7 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 |---|---|---|
 | M1 | Skeleton: config, logging, DB + migrations, gate, state machine, qBittorrent, manual bot, organizer, monitor | **done** |
 | M2 | Nyaa site-wide subscription: RSS + search catch-up, cursor, overlap re-check, content/release dedupe | **done** |
-| M3 | Nine metadata providers, proxy pool, image cache, translation | planned |
+| M3 | Nine metadata providers, proxy pool, image cache, translation | **done** |
 | M4 | Cards, full Telegram loop, message group deletion, push pipeline | planned |
 | M5 | Transmission, admin commands, metrics, full integration tests, backup/deploy docs | planned |
 
@@ -68,6 +68,27 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 - **Push queue query** (`app/services/push_queue.py`): read-only selection of
   contents that have a release but are not accepted, not blacklisted and not yet
   notified — M4 will drive cards from it without touching the gate.
+
+### What M3 adds
+
+- **Nine provider adapters** (`app/providers/`): Fc2, fc2_hub, Javdb, Mmtv,
+  freejavbt, miss_av, Javlibrary, avsox, Madou, plus the Nyaa view-page fallback.
+  Each has its own URL builder and selectors; a page that no longer matches raises
+  `ProviderError("structure_changed")` instead of returning an empty success.
+- **Field-level aggregation** (`app/providers/coordinator.py`): fixed order, no
+  overwrite, gap filling, preview dedupe and cap, early stop, failure isolation,
+  censorship conflicts become `UNKNOWN`, Nyaa fallback only for what is missing.
+- **Proxy pool and routing** (`app/network/proxy.py`): per-provider profile,
+  CDN-domain override (exact host or parent domain), and a JP failover chain that
+  never falls back to `direct`.
+- **Image pipeline** (`app/network/image_fetcher.py`): routed download, size cap,
+  content-type allowlist (SVG/HTML rejected), Pillow decode + pixel-bomb guard,
+  public-IP and per-redirect SSRF checks, content-addressed cache.
+- **Asset storage and Telegram file_id cache** (`app/services/metadata.py`,
+  `app/services/telegram_assets.py`): `assets` rows with dimensions/hash/proxy,
+  dedupe by normalised URL and SHA-256, `file_id` cached per bot and per hash.
+- **Translation** (`app/services/translate.py`): OpenAI-compatible, non-fatal on
+  failure, result cached in `contents.description_zh`.
 
 ## Requirements
 
@@ -158,11 +179,12 @@ app/
   bots/        manual bot (subscription bot in M4)
   db/          models, session, Alembic migrations
   downloaders/ downloader protocol + qBittorrent
-  network/     explicit HTTP client (retries, Retry-After, per-domain limit)
+  network/     HTTP client, proxy routing, image fetcher (SSRF + decode checks)
   organizer/   paths, mover, stability, monitor
-  providers/   metadata provider protocol (nine adapters in M3)
+  providers/   base plumbing + nine adapters + coordinator (field-level merge)
   schemas/     release / metadata / download models
-  services/    normalize, gate, state, jobs, releases, subscription, manual ingest
+  services/    normalize, gate, state, jobs, releases, subscription, manual ingest,
+               metadata enrichment, translation, push queue, telegram assets
   sources/     source protocol + Nyaa adapter
 config/example.yaml   configuration template
 docker/entrypoint.sh  migrate, then exec the app (PID 1, graceful stop)
@@ -181,8 +203,13 @@ tests/                unit + integration + live (opt-in), all offline by default
 | `nyaa.search_max_pages` | 5 | Pagination cap |
 | `nyaa.overlap_item_ids` | 200 | Item ids remembered for the overlap re-check |
 | `nyaa.trackers` | `[]` | Appended to magnets built from the RSS info hash |
+| `provider.sources.<id>.proxy` | `japan` | Per-provider proxy profile |
 | `provider.strict_enabled` | true | False allows disabling a provider (logged + audited) |
 | `download.max_retries` | 5 | Automatic resubmission cap |
+| `image_fetch.cache_dir` | `/app/data/cache/images` | Content-addressed image cache |
+| `image_fetch.allowed_hosts` | `[]` | Strict image host allowlist; empty derives from provider registered domains |
+| `translation.enabled` | true | Requires `TRANSLATION_BASE_URL` / `_API_KEY` / `_MODEL` |
+| `image_fetch.max_previews` / `min_preview_images` | 9 / 3 | Card preview budget and early-stop threshold |
 
 `FC2_LOG_LEVEL` and `FC2_DATABASE_URL` are the only environment overrides
 (env > yaml).
@@ -201,6 +228,10 @@ See [`docs/deviations.md`](docs/deviations.md). The short version:
    later uploaders as candidate sources.
 6. `ACCEPTED` jobs are reconciled at startup with a retry cap.
 7. Nyaa fixtures are constructed samples, never captured real pages.
+8. Image host allowlist derives from provider registered domains unless set.
+9. Translation is enabled by default and fails startup without credentials.
+10. Only the FC2 provider has been verified against a live page; the other eight
+    could not be reached from the build environment (Cloudflare/403/JS challenge).
 
 ## Licence
 

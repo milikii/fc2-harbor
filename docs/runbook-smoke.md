@@ -30,12 +30,14 @@ cp config/example.yaml config/config.yaml && ${EDITOR:-vi} config/config.yaml
 | `MANUAL_BOT_TOKEN` | 手动投递 Bot token |
 | `TELEGRAM_ALLOWED_USER_IDS` | 允许使用的 Telegram 用户 id，逗号分隔 |
 | `QBITTORRENT_URL` / `QBITTORRENT_USERNAME` / `QBITTORRENT_PASSWORD` | NAS 上的 qB Web API |
+| `TRANSLATION_BASE_URL` / `TRANSLATION_API_KEY` / `TRANSLATION_MODEL` | OpenAI 兼容翻译端点；没有就设 `translation.enabled: false` |
 | `SUBSCRIPTION_BOT_TOKEN` | 留空（M4 才启用） |
 
 `config/config.yaml` 必改：
 
 - `storage.path_mappings`：`remote` 是 qBittorrent 看到的路径，`local` 是容器内路径（compose 里都是 `/downloads`，一般不用改）。
 - `storage.final_roots`：媒体目录，默认 `/library/<category>`。
+- `image_fetch.cache_dir`：图片缓存，默认 `/app/data/cache/images`（随 `./data` 卷持久化）。
 - `downloaders.qbittorrent.url`：容器内能访问到的 qB 地址（NAS 局域网 IP）。
 
 权限：容器以 uid/gid 1000 运行，下载目录必须与 qBittorrent 的属主一致：
