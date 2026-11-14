@@ -6,49 +6,65 @@ organize the finished files into a media library — idempotently, and without e
 deleting data that has not been safely moved.
 
 The implementation follows [`docs/BT_AUTOMATION_SPEC.md`](docs/BT_AUTOMATION_SPEC.md);
-that repository copy is the authoritative specification.
+that repository copy is the authoritative specification. Every deliberate
+deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 
 ## Status
 
 | Milestone | Scope | State |
 |---|---|---|
 | M1 | Skeleton: config, logging, DB + migrations, gate, state machine, qBittorrent, manual bot, organizer, monitor | **done** |
-| M2 | Nyaa site-wide subscription (RSS + search fallback) | planned |
+| M2 | Nyaa site-wide subscription: RSS + search catch-up, cursor, overlap re-check, content/release dedupe | **done** |
 | M3 | Nine metadata providers, proxy pool, image cache, translation | planned |
-| M4 | Cards, full Telegram loop, message group deletion, reconciliation | planned |
+| M4 | Cards, full Telegram loop, message group deletion, push pipeline | planned |
 | M5 | Transmission, admin commands, metrics, full integration tests, backup/deploy docs | planned |
 
-### What M1 already does
+### What M1 does
 
 - **Configuration** (`app/config.py`): YAML + `${ENV_VAR}` expansion, pydantic v2
   validation, fail-fast errors that name the missing variable, secret redaction.
   The nine-provider order from spec 7.1 is validated at startup and cannot be
   reordered.
 - **Logging** (`app/logging.py`): structlog JSON/console output with the spec 21
-  fields, plus a redaction processor that masks tokens, passwords, cookies, API
-  keys, URL credentials and Telegram bot tokens.
+  fields, plus a redaction processor for tokens, passwords, cookies, API keys,
+  URL credentials and Telegram bot tokens.
 - **Database** (`app/db/`): SQLAlchemy 2.x models for all ten spec tables, Alembic
   migration, SQLite WAL, foreign keys on, `BEGIN IMMEDIATE` write serialisation.
 - **Content gate** (`app/services/gate.py`): blacklist → accepted → info hash →
   source item, in that order, in one transaction with the accepted-entry write.
 - **State machine** (`app/services/state.py`): the spec 13 lifecycle with
-  compare-and-set updates, per-state timestamps and an audit trail in
-  `decision_events`.
+  compare-and-set updates, per-state timestamps and an audit trail.
 - **qBittorrent adapter** (`app/downloaders/qbittorrent.py`): add/get/list/remove,
   explicit save path, AutoTMM disabled, idempotent add, `deleteFiles=false`
   enforced in code.
-- **Manual bot** (`app/bots/manual.py`, `app/services/manual_ingest.py`): magnet
-  parsing, FC2 normalisation, the shared gate, category buttons for ambiguous
-  content, `_review` fallback, `/status`, `/retry`.
-- **Organizer** (`app/organizer/`): explicit path mapping, directory-name
-  sanitising with traversal protection, atomic same-disk rename, cross-disk
-  `.partial` + `fsync` + size/SHA-256 verification + atomic rename, failure keeps
-  sources and task.
+- **Manual bot** (`app/bots/manual.py`): magnet parsing, FC2 normalisation, the
+  shared gate, category buttons, `_review` fallback, `/status`, `/retry`.
+- **Organizer** (`app/organizer/`): explicit path mapping, sanitising with
+  traversal protection, atomic same-disk rename, cross-disk `.partial` + `fsync` +
+  verification + atomic rename, failure keeps sources and task.
 - **Monitor**: completion = progress 1.0 **and** a finished state **and** two
-  identical filesystem observations; organize first, then remove the task; startup
-  reconciliation re-submits accepted-but-unsubmitted jobs.
-- **Health API** (`app/api/health.py`): `/healthz`, `/readyz`, `/status`, bound
-  inside the container network only.
+  identical filesystem observations; organize first, then remove the task.
+
+### What M2 adds
+
+- **Nyaa source adapter** (`app/sources/nyaa.py`): site-wide FC2 RSS first, HTML
+  search page as catch-up when one round overflows the RSS window. No uploader
+  filter can be configured (spec 6.1).
+- **Explicit HTTP client** (`app/network/clients.py`): per-domain concurrency,
+  retry only idempotent GETs, `Retry-After` honoured, conditional requests
+  (`If-None-Match` / `If-Modified-Since`), `trust_env=False`.
+- **Cursor and overlap re-check**: `source_cursors` stores ETag, Last-Modified and
+  the last item ids; each round re-evaluates the whole page and the database
+  decides what is new — never `pubDate > cursor` alone.
+- **First-run window**: only items within `initial_lookback_hours` (default 24) are
+  processed on the first round.
+- **Release registrar** (`app/services/releases.py`): gate **before** the release
+  write; an already-accepted FC2 number still stores a new uploader's release as a
+  candidate download source, without job, accepted entry or push.
+- **Poller** (`app/services/subscription.py`): interval + jitter, failure counter,
+  per-candidate isolation, spec 21 round metrics.
+- **Bounded resubmission**: startup reconciliation retries `ACCEPTED` jobs, stops
+  at `download.max_retries` and reports instead of looping forever.
 
 ## Requirements
 
@@ -72,15 +88,17 @@ cp config/example.yaml config/config.yaml
 Checks:
 
 ```bash
-.venv/bin/pytest        # 185 tests, no network access
+.venv/bin/pytest              # unit + integration, no network
+.venv/bin/pytest --run-live   # manual live smoke against sukebei.nyaa.si
 .venv/bin/ruff check .
 .venv/bin/mypy app
 ```
 
 Tests never touch the real network: qBittorrent is a fake (or a mocked HTTP
-transport via `respx`), Telegram is a fake, and all paths live in `tmp_path`. The
-schema used by tests is created once per session by running the real Alembic
-migration.
+transport via `respx`), Telegram is a fake, Nyaa responses come from static
+fixtures, and all paths live in `tmp_path`. `live` tests are skipped unless
+`--run-live` is passed. The schema used by tests is created once per session by
+running the real Alembic migration.
 
 ## Deployment
 
@@ -109,11 +127,13 @@ Operational notes:
   it; an unmapped path fails the job instead of guessing.
 - Daily backup: `./scripts/backup.sh /path/to/backups` uses the SQLite online
   backup API and archives `config/`, keeping 14 copies.
+- First real run on the NAS: follow [`docs/runbook-smoke.md`](docs/runbook-smoke.md).
 
 ## Safety rules encoded in the code
 
 - Gate order is fixed: blacklist → accepted → info hash → source item, and the
-  check plus the `accepted_entries` write share one transaction.
+  check plus the `accepted_entries` write share one transaction. The gate is always
+  evaluated **before** a release row is written.
 - A qBittorrent task is removed only after the organizer reports every file
   moved; removal always uses `deleteFiles=false`.
 - Files are never moved before the download is complete and file counts/sizes
@@ -135,36 +155,49 @@ app/
   bots/        manual bot (subscription bot in M4)
   db/          models, session, Alembic migrations
   downloaders/ downloader protocol + qBittorrent
+  network/     explicit HTTP client (retries, Retry-After, per-domain limit)
   organizer/   paths, mover, stability, monitor
-  schemas/     release / metadata / download models
-  services/    normalize, gate, state, jobs, manual ingest, notify
-  sources/     source adapter protocol (Nyaa in M2)
   providers/   metadata provider protocol (nine adapters in M3)
+  schemas/     release / metadata / download models
+  services/    normalize, gate, state, jobs, releases, subscription, manual ingest
+  sources/     source protocol + Nyaa adapter
 config/example.yaml   configuration template
 docker/entrypoint.sh  migrate, then exec the app (PID 1, graceful stop)
-docs/                 versioned specification
+docs/                 specification, deviations log, NAS smoke runbook
 scripts/backup.sh     daily backup helper
-tests/                unit + integration, all offline
+tests/                unit + integration + live (opt-in), all offline by default
 ```
 
-## Known deviations and open questions
+## Configuration highlights added in M2
 
-Kept explicit so they can be reviewed rather than silently assumed:
+| Key | Default | Meaning |
+|---|---|---|
+| `fc2.code_min_digits` / `code_max_digits` | 5 / 8 | FC2 number width; outside this range nothing is treated as a content id |
+| `nyaa.rss_path` / `search_path` | site-wide FC2 | Neither may carry an uploader filter |
+| `nyaa.rss_page_size` | 75 | A full RSS page triggers the search catch-up |
+| `nyaa.search_max_pages` | 5 | Pagination cap |
+| `nyaa.overlap_item_ids` | 200 | Item ids remembered for the overlap re-check |
+| `nyaa.trackers` | `[]` | Appended to magnets built from the RSS info hash |
+| `provider.strict_enabled` | true | False allows disabling a provider (logged + audited) |
+| `download.max_retries` | 5 | Automatic resubmission cap |
 
-1. `config/example.yaml` quotes every `${VAR}` placeholder. The spec's section 18
-   example puts `${JP_PROXY_URL}` inside a YAML flow mapping, which is not valid
-   YAML (`{` starts a mapping).
-2. FC2 numbers are accepted at 5–8 digits. The spec lists formats but not the
-   digit range; shorter numbers in prose are not treated as content ids.
-3. `provider.sources` must keep the nine canonical hosts and stay `enabled`. This
-   enforces spec 7.1/25.4 at startup; a temporarily broken provider is handled by
-   runtime health in M3, not by disabling it in configuration.
-4. `translation.enabled=true` is rejected until M3 instead of being silently
-   ignored.
-5. `gate.admit` writes the release row, so the gate must be evaluated **before** a
-   release is persisted. The M2 poller will follow that contract.
-6. The manual bot's "choose a category" step keeps the pending submission in
-   memory; a restart drops it (nothing was written yet, so re-sending is safe).
+`FC2_LOG_LEVEL` and `FC2_DATABASE_URL` are the only environment overrides
+(env > yaml).
+
+## Known deviations
+
+See [`docs/deviations.md`](docs/deviations.md). The short version:
+
+1. pydantic-settings is not used; the YAML loader plus two env overrides is
+   deliberate (nested validation stays traceable).
+2. The spec's section 18 YAML example is not valid YAML; placeholders are quoted.
+3. FC2 digit width is configuration, not a hardcoded constant.
+4. `provider.strict_enabled` is the explicit, audited escape hatch for a broken
+   source.
+5. The gate runs before the release write; an already-accepted number still stores
+   later uploaders as candidate sources.
+6. `ACCEPTED` jobs are reconciled at startup with a retry cap.
+7. Nyaa fixtures are constructed samples, never captured real pages.
 
 ## Licence
 
