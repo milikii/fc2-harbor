@@ -115,7 +115,10 @@ docker compose logs -f app
 1. `db.migrate.start` → `db.migrate.done`：建表/升级数据库
 2. `downloader.registry.ready`：qB 适配器就绪（此时还没连 qB）
 3. `monitor.reconcile`：扫描未完成任务并对账
-4. `app.ready`：任务列表（health-server / manual-bot / monitor / subscription / publisher …）
+4. `app.ready`：任务列表与 Bot 分工。会看到
+   `polling_bots={"manual-bot":"manual","subscription-bot":"subscription"}`——
+   **两个 Bot 各自 poll 自己的 update**（卡片按钮的回调只会投递给发卡片的那个 Bot），
+   `sends_cards=["subscription-bot"]`、`deletes_messages=["subscription-bot"]`。
 5. `subscription.started`：开始按 180s + 抖动轮询 Nyaa
 
 第一轮会回看最近 24 小时，`subscription.round` 日志里 `fetched`/`recorded` 应该大于 0（站点上确实有 FC2 资源时）。
@@ -202,6 +205,7 @@ docker compose logs -f app   # 应看到 db.migrate.done 且没有报错
 | `downloader_auth_failed` | qB 用户名/密码错，或 qB 开了「本地认证绕过」而地址不对 |
 | `downloader_unreachable` | 容器访问不到 `QBITTORRENT_URL`；用 `docker compose exec app wget -qO- <url>` 试 |
 | 卡片收不到 | 两个 Bot 都先 `/start`；`TELEGRAM_ALLOWED_USER_IDS` 是否含你的 id；`SUBSCRIPTION_BOT_TOKEN` 是否填了 |
+| 卡片收到但按钮点了没反应 | 确认 `app.ready` 里有 `subscription-bot` 任务、`polling_bots` 包含它；按钮回调只会投递给发卡片的 Bot，订阅 Bot 没 poll 就永远收不到 |
 | `organize_failed` | 目标目录权限/磁盘满/跨盘复制失败；日志有 stage 与路径，源文件与任务都还在，修好后 `/retry <job_id>` |
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
