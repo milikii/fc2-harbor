@@ -242,10 +242,22 @@ async def run(settings: Settings) -> None:
                 ),
                 name="monitor",
             ),
-            asyncio.create_task(poller.run(stop_event), name="subscription"),
-            *tasks_extra,
         ]
-        _log.info("app.ready", tasks=[task.get_name() for task in tasks])
+        if settings.subscription.polling_enabled:
+            tasks.append(asyncio.create_task(poller.run(stop_event), name="subscription"))
+        else:
+            _log.warning(
+                "app.subscription_polling_disabled",
+                reason="subscription.polling_enabled=false",
+            )
+        tasks.extend(tasks_extra)
+        _log.info(
+            "app.ready",
+            tasks=[task.get_name() for task in tasks],
+            subscription_polling=settings.subscription.polling_enabled,
+            max_push_per_round=settings.subscription.max_push_per_round,
+            initial_backfill_silent=settings.nyaa.initial_backfill_silent,
+        )
 
         await stop_event.wait()
         _log.info("app.stopping")
@@ -310,6 +322,22 @@ async def _audit_provider_configuration(db: Database, settings: Settings) -> Non
             actor="system",
             reason=",".join(disabled),
         )
+
+
+def planned_tasks(settings: Settings) -> list[str]:
+    """Names of the supervised tasks, derived from configuration only.
+
+    Used by startup logging and by the tests: with ``subscription.polling_enabled``
+    false the poller must not appear at all, so the operator can run the manual bot
+    without touching Nyaa.
+    """
+
+    names = ["health-server", "manual-bot", "monitor"]
+    if settings.subscription.polling_enabled:
+        names.append("subscription")
+    if settings.telegram.subscription_bot_token is not None:
+        names.extend(["publisher", "message-deleter"])
+    return names
 
 
 def _install_signal_handlers(stop_event: asyncio.Event) -> None:

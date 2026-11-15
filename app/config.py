@@ -239,7 +239,7 @@ class _FrozenModel(BaseModel):
 
 class AppSection(_FrozenModel):
     timezone: str = "Asia/Shanghai"
-    database_url: str = "sqlite:////app/data/app.db"
+    database_url: str = "sqlite+aiosqlite:////app/data/app.db"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_json: bool = True
     #: Rotating log file on the data volume (spec 19/24: logs must be backupable).
@@ -275,6 +275,14 @@ class AppSection(_FrozenModel):
             raise ValueError(
                 "database_url must be a sqlite URL for the first version, "
                 f"got {value.split(':', 1)[0]!r}"
+            )
+        if not value.startswith("sqlite+aiosqlite:"):
+            # The app only creates an async engine; a sync driver URL fails at
+            # startup with an obscure SQLAlchemy error, so reject it here.
+            raise ValueError(
+                "database_url must use the async driver, e.g. "
+                "sqlite+aiosqlite:////app/data/app.db, "
+                f"got {value.split('://', 1)[0]!r}"
             )
         if ":memory:" in value:
             raise ValueError("database_url must point at a file, not an in-memory database")
@@ -335,6 +343,15 @@ class Fc2Section(_FrozenModel):
         return self
 
 
+class SubscriptionSection(_FrozenModel):
+    """Polling and push budget (spec 6.2 / 9)."""
+
+    #: False runs only the manual bot: no Nyaa polling at all.
+    polling_enabled: bool = True
+    #: Cards published per round; keeps a backlog from flooding the chat.
+    max_push_per_round: int = Field(default=10, ge=1, le=100)
+
+
 class NyaaSection(_FrozenModel):
     base_url: str = "https://sukebei.nyaa.si"
     query: str = "FC2"
@@ -355,6 +372,10 @@ class NyaaSection(_FrozenModel):
     overlap_item_ids: int = Field(default=200, ge=10, le=2000)
     #: Trackers appended to magnets built from an RSS info hash.
     trackers: list[str] = Field(default_factory=list)
+    #: The first run backfills ``initial_lookback_hours``; those contents are
+    #: marked as backfilled and never pushed, so a fresh install does not flood the
+    #: user with hundreds of cards.
+    initial_backfill_silent: bool = True
     user_agent: str = "fc2-harbor/0.1 (+https://github.com/milikii/fc2-harbor)"
     timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     retries: int = Field(default=2, ge=0, le=5)
@@ -762,6 +783,7 @@ class Settings(_FrozenModel):
     telegram: TelegramSection
     fc2: Fc2Section = Field(default_factory=Fc2Section)
     nyaa: NyaaSection = Field(default_factory=NyaaSection)
+    subscription: SubscriptionSection = Field(default_factory=SubscriptionSection)
     provider: ProviderSection
     proxy_profiles: dict[str, ProxyProfile]
     image_fetch: ImageFetchSection = Field(default_factory=ImageFetchSection)

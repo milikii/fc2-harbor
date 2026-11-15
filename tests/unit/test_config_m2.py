@@ -43,7 +43,7 @@ def test_env_overrides_win_over_yaml(tmp_path: Path) -> None:
     env = {
         **BASE_ENV,
         "FC2_LOG_LEVEL": "DEBUG",
-        "FC2_DATABASE_URL": f"sqlite:///{tmp_path / 'override.db'}",
+        "FC2_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'override.db'}",
     }
 
     settings = Settings.load(path, env=env)

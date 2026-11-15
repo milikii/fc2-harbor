@@ -6,7 +6,7 @@
 
 app:
   timezone: Asia/Shanghai
-  database_url: sqlite:////app/data/app.db
+  database_url: sqlite+aiosqlite:////app/data/app.db
   log_level: INFO
   log_json: true
   # Rotating log file on the data volume so logs are persisted and backed up.
@@ -14,6 +14,12 @@ app:
   # Internal health/status endpoint, bound inside the container network only.
   health_host: 0.0.0.0
   health_port: 8080
+
+subscription:
+  # false = only the manual bot runs; Nyaa polling is not started at all.
+  polling_enabled: true
+  # Cards published per round; a backlog drains gradually instead of flooding.
+  max_push_per_round: 10
 
 fc2:
   # Digit width used to recognise an FC2 PPV number (spec 6.3 lists formats but
@@ -34,6 +40,9 @@ nyaa:
   scope: site
   poll_interval_seconds: 180
   initial_lookback_hours: 24
+  # First start backfills this window. Those contents are marked as backfilled and
+  # never pushed as cards; only content found after the first round is delivered.
+  initial_backfill_silent: true
   proxy: direct
   # RSS first; the search page is the catch-up path when one round overflows
   # the RSS window. Neither path may carry an uploader filter (spec 6.1).
