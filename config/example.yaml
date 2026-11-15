@@ -109,14 +109,21 @@ image_fetch:
   #   - nyaa.si
 
 translation:
-  # Requires base_url/api_key/model; startup fails fast if enabled without them.
-  # Set enabled: false when no translation endpoint is available.
+  # google_free: key-less Google endpoint (clients5.google.com/translate_a/t).
+  # It must go through a proxy profile; direct connections time out from here.
+  # A blocked or broken endpoint only leaves description_zh empty — the card is
+  # still sent with the Japanese text.
+  # Switch to openai_compatible to use a chat-completions endpoint instead; that
+  # one requires base_url + api_key + model and fails fast when enabled without them.
   enabled: true
-  provider: openai_compatible
+  provider: google_free
+  proxy: japan
+  target_language: zh-CN
+  source_language: ja
+  # openai_compatible only (placeholders — leave unset for google_free):
   base_url: "${TRANSLATION_BASE_URL}"
   api_key: "${TRANSLATION_API_KEY}"
   model: "${TRANSLATION_MODEL}"
-  target_language: zh-CN
 
 download:
   default_downloader: qbittorrent

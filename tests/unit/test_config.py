@@ -119,11 +119,30 @@ def test_poll_interval_bounds(tmp_path: Path) -> None:
         Settings.from_mapping(config, env={})
 
 
-def test_translation_requires_credentials_when_enabled(tmp_path: Path) -> None:
-    config = deep_update(make_config(tmp_path), {"translation": {"enabled": True}})
+def test_openai_translation_requires_credentials_when_enabled(tmp_path: Path) -> None:
+    config = deep_update(
+        make_config(tmp_path),
+        {"translation": {"enabled": True, "provider": "openai_compatible"}},
+    )
     with pytest.raises(ConfigError) as excinfo:
         Settings.from_mapping(config, env={})
     assert "translation.enabled requires" in str(excinfo.value)
+
+
+def test_google_free_translation_needs_no_credentials(tmp_path: Path) -> None:
+    config = deep_update(make_config(tmp_path), {"translation": {"enabled": True}})
+    settings = Settings.from_mapping(config, env={})
+    assert settings.translation.provider == "google_free"
+    assert settings.translation.proxy == "japan"
+
+
+def test_google_free_translation_rejects_an_unknown_proxy(tmp_path: Path) -> None:
+    config = deep_update(
+        make_config(tmp_path), {"translation": {"enabled": True, "proxy": "nope"}}
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        Settings.from_mapping(config, env={})
+    assert "translation.proxy" in str(excinfo.value)
 
 
 def test_translation_loads_when_fully_configured(tmp_path: Path) -> None:
@@ -132,6 +151,7 @@ def test_translation_loads_when_fully_configured(tmp_path: Path) -> None:
         {
             "translation": {
                 "enabled": True,
+                "provider": "openai_compatible",
                 "base_url": "https://translate.example/v1",
                 "api_key": "key",
                 "model": "model",

@@ -30,7 +30,13 @@ from app.network.image_fetcher import FetchedImage, ImageFetcher, ImageFetchErro
 from app.network.proxy import ProxyRouter
 from app.providers.coordinator import AggregatedMetadata, MetadataCoordinator, ProviderRun
 from app.schemas.metadata import ProviderContext
-from app.services.translate import OpenAITranslator, TranslationError
+from app.services.translate import (
+    GOOGLE_FREE_ENDPOINT,
+    GoogleFreeTranslator,
+    OpenAITranslator,
+    TranslationError,
+    Translator,
+)
 
 _log = get_logger("metadata.service")
 
@@ -105,7 +111,7 @@ class MetadataService:
         fetcher: ImageFetcher,
         settings: Settings,
         router: ProxyRouter,
-        translator: OpenAITranslator | None = None,
+        translator: Translator | None = None,
         metrics: object | None = None,
     ) -> None:
         self.db = db
@@ -346,10 +352,23 @@ class MetadataService:
         return translated
 
 
-def build_translator(settings: Settings) -> OpenAITranslator | None:
+def build_translator(settings: Settings) -> Translator | None:
+    """Construct the configured translator; ``None`` when translation is off."""
+
     config = settings.translation
     if not config.enabled:
         return None
+    if config.provider == "google_free":
+        profile = settings.proxy_profile(config.proxy)
+        return GoogleFreeTranslator(
+            target_language=config.target_language,
+            source_language=config.source_language,
+            proxy_url=None if profile.type == "direct" else profile.url,
+            # The endpoint is fixed: base_url belongs to the OpenAI backend and
+            # mixing them is a trap, not a feature.
+            endpoint=GOOGLE_FREE_ENDPOINT,
+            timeout_seconds=config.timeout_seconds,
+        )
     if not (config.base_url and config.api_key and config.model):
         return None
     return OpenAITranslator(

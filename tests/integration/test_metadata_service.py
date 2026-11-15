@@ -298,3 +298,66 @@ def test_image_allowlist_derives_from_providers(tmp_path: Path) -> None:
 def test_explicit_allowlist_wins(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, image_fetch={"allowed_hosts": ["cdn.example.com"]})
     assert derive_image_allowlist(settings) == ["cdn.example.com"]
+
+
+class _FailingTranslator:
+    """Stands in for a blocked Google endpoint."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, text: str | None) -> str | None:
+        from app.services.translate import TranslationError
+
+        self.calls += 1
+        raise TranslationError("non_json", "blocked: HTML interstitial")
+
+
+async def test_translation_failure_leaves_description_empty(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    service = build_service(db, settings, tmp_path)
+    translator = _FailingTranslator()
+    service.translator = translator
+
+    result_obj = await service.enrich(content_id)
+
+    assert translator.calls == 1
+    assert result_obj.description_zh is None
+    assert result_obj.metadata_complete is True
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        assert content.description_ja == "作品の説明です。"
+        assert content.description_zh is None
+
+
+def test_build_translator_wires_the_google_endpoint_and_proxy(
+    tmp_path: Path,
+) -> None:
+    from app.services.metadata import build_translator
+    from app.services.translate import GoogleFreeTranslator
+
+    settings = direct_provider_settings(tmp_path)
+    settings = settings.model_copy(
+        update={
+            "translation": settings.translation.model_copy(
+                update={"enabled": True, "proxy": "direct"}
+            )
+        }
+    )
+    translator = build_translator(settings)
+
+    assert isinstance(translator, GoogleFreeTranslator)
+
+
+def test_build_translator_returns_none_when_disabled(tmp_path: Path) -> None:
+    from app.services.metadata import build_translator
+
+    settings = direct_provider_settings(tmp_path)
+    settings = settings.model_copy(
+        update={"translation": settings.translation.model_copy(update={"enabled": False})}
+    )
+    assert build_translator(settings) is None

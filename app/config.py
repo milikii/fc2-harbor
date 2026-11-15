@@ -582,28 +582,34 @@ class ImageFetchSection(_FrozenModel):
 
 class TranslationSection(_FrozenModel):
     enabled: bool = False
-    provider: Literal["openai_compatible"] = "openai_compatible"
+    #: ``google_free`` is the key-less Google endpoint (needs a proxy from this
+    #: host); ``openai_compatible`` needs base_url + api_key + model.
+    provider: Literal["google_free", "openai_compatible"] = "google_free"
+    #: Proxy profile used for ``google_free``. Direct connections are blocked here.
+    proxy: str = "japan"
     base_url: str | None = None
     api_key: SecretStr | None = None
     model: str | None = None
     target_language: str = "zh-CN"
+    source_language: str = "ja"
     timeout_seconds: float = Field(default=30.0, gt=0, le=120)
 
     @model_validator(mode="after")
     def _check_enabled(self) -> TranslationSection:
         if not self.enabled:
             return self
-        missing = [
-            name
-            for name, value in (
-                ("base_url", self.base_url),
-                ("api_key", self.api_key),
-                ("model", self.model),
-            )
-            if not value
-        ]
-        if missing:
-            raise ValueError(f"translation.enabled requires: {missing}")
+        if self.provider == "openai_compatible":
+            missing = [
+                name
+                for name, value in (
+                    ("base_url", self.base_url),
+                    ("api_key", self.api_key),
+                    ("model", self.model),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(f"translation.enabled requires: {missing}")
         if self.base_url:
             _validate_http_url(self.base_url, "translation.base_url")
         return self
@@ -817,6 +823,8 @@ class Settings(_FrozenModel):
         )
         if self.image_fetch.default_proxy != "inherit_provider":
             referenced.append(("image_fetch.default_proxy", self.image_fetch.default_proxy))
+        if self.translation.enabled and self.translation.provider == "google_free":
+            referenced.append(("translation.proxy", self.translation.proxy))
 
         unknown = [f"{field}={profile}" for field, profile in referenced if profile not in names]
         if unknown:
