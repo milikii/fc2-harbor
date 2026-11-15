@@ -133,6 +133,10 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
   and last error. Exposed through `/status` and `/providers`.
 - **Spec 22.3 integration tests** (`tests/integration/test_spec_22_3.py`): the seven
   end-to-end guarantees, one test per sentence of the specification.
+- **Legacy import** (`scripts/import_legacy.py`): one-off adoption of the old
+  fc2bot/torrentino state (pushed cards, dead records, blacklist, done/claims,
+  pending log) and of existing Transmission tasks, with dry-run, idempotency,
+  conflict reporting and a precise rollback.
 - **Acceptance and deployment docs**: [`docs/acceptance.md`](docs/acceptance.md)
   maps all 19 checklist items to evidence; [`docs/deploy.md`](docs/deploy.md) walks
   through a from-zero installation.

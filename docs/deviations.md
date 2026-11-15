@@ -194,3 +194,16 @@
 ## 26. CookieCloud 未实现
 
 - 现状：本仓库没有 CookieCloud 相关代码或配置（`grep -i cookiecloud` 为空），因此没有可修的版本兼容问题。若后续要接入，按第 25 条的写法处理响应判定。
+
+## 27. 旧系统接管的口径
+
+- 背景：从 fc2bot / torrentino / tr-bt 一次性接管状态，导入器 `scripts/import_legacy.py`。
+- 口径（与用户逐条确认）：
+  - `seen` 里 `messages` 非空的记录 → `contents` + `notifications`（`bot_name='legacy:torrentino'`、`status='legacy'`），不再推送。
+  - `dead` 记录 → `notifications`（`status='legacy:dead'`），**不进黑名单**：用户没否掉它们，只是当时没下成；以后有新发布仍可被门禁放行。
+  - `fc2_done.jsonl` / `fc2_claims.jsonl` → `accepted_entries`（`origin='legacy_import'`），有 hash 的补 `releases`（`source='legacy'`）。
+  - `fc2_done.jsonl.pending` **不导入**：它是旧系统「删卡片」队列（`DoneDeletionQueue`），不是下载记录；导入会误挡内容。
+  - `retry` 记录 **不导入**：临时失败还会重试，不能当已处理。
+  - Transmission 任务分两路：`finished` 建 `DOWNLOADED` job 交给现有整理器（成功后才删 tr 任务，`deleteFiles=false`），`incomplete` 建 `DOWNLOADING` + `qbittorrent` job 交给监控接管；**不建** tr 的下载 job（那些任务还在 tr 里做种，我们只做登记）。
+- 需要的枚举值（迁移 0003）：`accepted_origin` 增加 `legacy_import`、`legacy:transmission`；`notification_status` 增加 `legacy`、`legacy:dead`。推送队列把 `legacy` / `legacy:dead` 视为「已处理」，所以旧卡片不会再推。
+- 回滚按标记删除（`bot_name` / `origin LIKE 'legacy%'` / `source IN ('legacy','transmission')` / `reason='legacy_import'`），导入时新建的 content 用报告里的 `created_content_keys` 精确清理，见 `docs/deploy.md` 9e。

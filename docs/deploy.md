@@ -198,6 +198,90 @@ docker compose logs -f app   # 应看到 db.migrate.done 且没有报错
 - 升级前建议先备份（`./scripts/backup.sh`）；迁移只前进，回退需要手动 `alembic downgrade` 并恢复数据。
 - 升级后看日志 `app.ready` 里的 `subscription_polling`、`max_push_per_round`、`initial_backfill_silent` 三项，确认与配置一致。
 
+## 9c. 接管旧系统数据（一次性导入）
+
+旧系统（fc2bot / torrentino）的状态可以用 `scripts/import_legacy.py` 接管。**先停应用**，避免导入期间轮询写库：
+
+```bash
+docker compose stop app
+docker compose run --rm app python scripts/import_legacy.py --dry-run
+```
+
+`--dry-run` 走的是同一套代码，只是最后回滚事务，所以打印的数字就是真实结果。确认后去掉 `--dry-run` 再跑一次：
+
+```bash
+docker compose run --rm app python scripts/import_legacy.py
+docker compose start app
+```
+
+默认读取 NAS 上的 `/home/docker/torrentino-fc2/config/` 与 `/home/docker/fc2-shared/`（可用 `--state/--blacklist/--dead/--done/--claims/--pending` 覆盖）。各文件去向：
+
+| 文件 | 去向 |
+|---|---|
+| `fc2_state.json`（`messages` 非空） | `contents` + `notifications`（`bot_name='legacy:torrentino'`、`status='legacy'`），不会再推 |
+| `fc2_dead.jsonl` | `notifications`（`status='legacy:dead'`），**不进黑名单**——用户没否掉它们 |
+| `fc2_blacklist.json` | `blacklist_entries`（`reason='legacy_import'`） |
+| `fc2_done.jsonl` | `accepted_entries`（`origin='legacy_import'`）+ 有 hash 时写 `releases`（`source='legacy'`） |
+| `fc2_claims.jsonl` | `accepted_entries` |
+| `fc2_done.jsonl.pending` | **不导入**：它是旧系统「删卡片」队列（`DoneDeletionQueue`），不是下载记录，导进去会误挡内容；只统计行数写进报告 |
+| `retry` 记录 | **不导入**：临时失败还会重试，不能当已处理 |
+| `--since 5007844` | 只导入编号 >= 该值的记录 |
+
+报告写在 `import-report.json`：按来源分组（`torrentino_pushed` / `torrentino_dead` / `torrentino_done` / `torrentino_claims` / `torrentino_pending` / `torrentino_blacklist` / `transmission`）给出创建数、跳过数、冲突数，另有 `conflicts` 明细和 `created_content_keys`（回滚用）。
+
+## 9d. 接管 tr-bt 的 Transmission 任务
+
+先让运维导出 JSON（每项至少要有 `name`、`hash`；`code`、`download_dir`、`size_bytes`、`status`、`qb_save_path` 按需）：
+
+```json
+[{"name": "FC2-PPV-5007851 标题", "hash": "2538176d…", "code": "5007851",
+  "download_dir": "/9KG", "size_bytes": 1234567, "status": "finished"}]
+```
+
+**先看计划**（只统计、不写库）：
+
+```bash
+docker compose run --rm app python scripts/import_legacy.py \
+  --transmission-migrate finished \
+  --transmission-export /tmp/tr-export.json --dry-run
+```
+
+计划里每个任务给出：编号、分类、目标路径、大小、动作（`organize` / `takeover` / `skip`），以及总计的「完成/跳过/冲突/总字节数」和按分类的目录汇总。确认后去掉 `--dry-run` 执行。
+
+- `--mode finished`：建 `download_jobs`，`status=DOWNLOADED`、`downloader=transmission`。随后**监控与整理器走真实代码路径**：按分类移动到 `/library/<category>/`、校验大小、成功后才删 tr 任务（`deleteFiles=false`）。需要 `downloaders.transmission.enabled: true`，否则监控取不到任务。
+- `--mode incomplete`：这些已由运维加进 qB，只建行：`status=DOWNLOADING`、`downloader=qbittorrent`、`remote_save_path` 取导出里的 `qb_save_path`（**不猜**）。之后监控接管，下完自动整理。
+- 分类：导出里给了 `category` 就用它；FC2 编号默认 `fc2`，其它默认 `jav`（报告逐条列出，执行前可核对）。
+- 导出里的 `error` / `percent_done` 会参与判定：
+  - `error=1`（tracker 拒绝该 hash）且 `percent_done=1.0` → 数据完整，按 finished 正常整理；
+  - `error=3`（Piece is corrupt）→ 先让运维在 tr 里 force recheck；recheck 后仍 `percent_done=1.0` 才按 finished，掉到 1.0 以下按 incomplete。按 finished 处理时报告会写一条 `error_3_piece_corrupt_verify_recheck` 警告；
+  - `percent_done` 缺失时退回 `status` 字段，两者都没有则跳过（`unknown_status`）。
+- 分批处理：`--only-hashes hashes.txt`（每行一个 hash，`#` 开头为注释）只处理指定任务，避免一次全跑。
+- 幂等：已有同 hash 的 job、或该编号已 accepted 的，跳过并记入冲突清单（例如用户正在下的 `fc2_ppv:4744486` 不会被碰）。
+- 报告写在 `migration-report.json`。
+
+## 9e. 回滚导入
+
+导入的每一行都有标记，按标记删除即可（先删 job，再删被引用的行）：
+
+```sql
+-- 在容器里执行：docker compose exec app python -c "import sqlite3; ..."
+DELETE FROM download_jobs
+ WHERE release_id IN (SELECT id FROM releases WHERE source IN ('legacy','transmission'));
+DELETE FROM notifications WHERE bot_name = 'legacy:torrentino';
+DELETE FROM blacklist_entries WHERE reason = 'legacy_import';
+DELETE FROM accepted_entries WHERE origin LIKE 'legacy%';
+DELETE FROM releases WHERE source IN ('legacy','transmission');
+```
+
+上面这一步是安全的：只删导入产生的行，不动用户自己的数据。导入时**新建的 contents** 不会自动删除（删错会丢用户数据），需要时用报告里的编号清单精确清理：
+
+```bash
+docker compose run --rm app python scripts/import_legacy.py \
+  --rollback-contents import-report.json
+```
+
+它只删「没有任何 accepted/blacklist/notification/release/job 引用」的内容，被引用的会保留并计数。
+
 ## 10. 首次冒烟
 
 按 `docs/runbook-smoke.md` 走一遍：订阅有记录、卡片能收到、点下载能进 qB、下载完能整理、点不感兴趣能删消息并拉黑。那份文档是逐步验收脚本，不是概念说明。
