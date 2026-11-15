@@ -108,6 +108,13 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
   the Bot that sent the message, so the subscription Bot polls its own dispatcher
   (card callbacks) while the manual Bot polls commands and magnet ingest. Startup
   logs name which Bot polls and which only sends.
+- **Bot factory and identity check** (`app/bots/factory.py`): both Bots are built
+  with `telegram.proxy` (via `AiohttpSession`) and `getMe` is called once at startup,
+  logging `telegram.bot_identity` or a loud `telegram.bot_unreachable`. A Bot that
+  cannot reach Telegram is visible in seconds instead of looking idle.
+- **Task supervisor** (`app/services/supervisor.py`): every background task is
+  wrapped, failures are logged with the task name, restarts are bounded and
+  exponential, and `/status` reports `running / restarting / dead / stopped`.
 - **Group deletion** (`app/services/notifications.py`): cover, description and all
   preview groups are deleted together; Telegram failures are retried in the
   background and never roll back the blacklist (spec 9.4).

@@ -171,3 +171,10 @@
   - 0002 迁移给已有内容补标记为回填，避免升级时把积压一次性推出去。
   - `subscription.max_push_per_round`（默认 10）取代硬编码的 50。
 - 理由：首次安装/升级不应该造成刷屏；需要回填内容时显式设 false。
+
+## 24. Telegram 会话的 socks5h 写法转换
+
+- 规格书：§8.1 代理类型包含 `socks5h`
+- 问题：`aiohttp-socks` / `python-socks` 只接受 `socks5://`，把 `socks5h://` 直接交给 `AiohttpSession` 会抛 `Invalid scheme component: socks5h`。而项目其余部分（httpx）用 `socks5h` 表示「由代理解析 DNS」。
+- 实现：`app/bots/factory.py::aiogram_proxy_url` 在构造 Bot 会话时把 `socks5h://` 转成 `socks5://`；python-socks 的 SOCKS5 连接器默认远程解析主机名，语义一致。
+- 理由：配置里保持统一的 `socks5h` 写法，只在 aiogram 边界做一次转换。

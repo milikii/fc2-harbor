@@ -120,6 +120,7 @@ docker compose logs -f app
    **两个 Bot 各自 poll 自己的 update**（卡片按钮的回调只会投递给发卡片的那个 Bot），
    `sends_cards=["subscription-bot"]`、`deletes_messages=["subscription-bot"]`。
 5. `subscription.started`：开始按 180s + 抖动轮询 Nyaa
+6. `telegram.bot_identity`：两个 Bot 各一条，带 `username` 和 `telegram_id`——**这条不出现就说明 Bot 连不上 Telegram**，会同时看到 `telegram.bot_unreachable`（提示检查 `telegram.proxy` 与网络）
 
 第一轮会回看最近 24 小时，`subscription.round` 日志里 `fetched`/`recorded` 应该大于 0（站点上确实有 FC2 资源时）。
 
@@ -135,6 +136,7 @@ proxy_profiles:
 ```
 
 - provider 用 `proxy: japan`；日本源只会在日本出口之间故障转移，**不会自动回退直连**。
+- **两个 Telegram Bot 也走 `telegram.proxy`**：把它指向一个可用的 profile（例如 `japan`），Bot 的 aiohttp session 就会带代理；设 `direct` 则直连。容器内 `api.telegram.org` 若被解析到不可达地址，直连会一直失败，而进程仍然「健康」。
 - 图片按 provider 继承代理，可用 `image_fetch.cdn_routes` 按 CDN 域名覆盖。
 - qBittorrent、Transmission、NAS 内网地址永远直连。
 
@@ -148,6 +150,9 @@ docker compose exec app curl -fsS http://127.0.0.1:8080/readyz
 # 状态：任务数、内容数、provider 命中率、代理失败率
 docker compose exec app curl -fsS http://127.0.0.1:8080/status | python3 -m json.tool
 ```
+
+`/status` 里的 `tasks` 字段显示每个后台任务的状态（`running / restarting / dead / stopped`）；
+某个 polling 任务挂掉后会自动重启（最多 3 次，指数退避），仍失败则标 `dead` 并打 ERROR 日志。
 
 `/status` 里的 `metrics.providers` 每个源给出 `hit / miss / structure / error / average_latency_ms / hit_rate`：
 
@@ -206,6 +211,7 @@ docker compose logs -f app   # 应看到 db.migrate.done 且没有报错
 | `downloader_unreachable` | 容器访问不到 `QBITTORRENT_URL`；用 `docker compose exec app wget -qO- <url>` 试 |
 | 卡片收不到 | 两个 Bot 都先 `/start`；`TELEGRAM_ALLOWED_USER_IDS` 是否含你的 id；`SUBSCRIPTION_BOT_TOKEN` 是否填了 |
 | 卡片收到但按钮点了没反应 | 确认 `app.ready` 里有 `subscription-bot` 任务、`polling_bots` 包含它；按钮回调只会投递给发卡片的 Bot，订阅 Bot 没 poll 就永远收不到 |
+| 容器 healthy 但 Bot 完全没反应 | 看启动日志有没有 `telegram.bot_identity`；有 `telegram.bot_unreachable` 就是连不上（多半是 `telegram.proxy` 没配或代理不通）；`/status` 的 `tasks` 里若 polling 任务是 `dead` 也在这里体现 |
 | `organize_failed` | 目标目录权限/磁盘满/跨盘复制失败；日志有 stage 与路径，源文件与任务都还在，修好后 `/retry <job_id>` |
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
