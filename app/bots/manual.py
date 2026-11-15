@@ -20,7 +20,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bots.commands import WhitelistFilter
 from app.bots.keyboards import category_keyboard
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.services.manual_ingest import ManualIngestService
 from app.services.normalize import extract_magnet
 
@@ -179,4 +179,6 @@ async def _safe_edit(callback: CallbackQuery, text: str) -> None:
     try:
         await message.edit_text(text)  # type: ignore[union-attr]
     except Exception as exc:
-        _log.warning("bot.edit_failed", error_code=type(exc).__name__)
+        _log.warning(
+            "bot.edit_failed", error_code=type(exc).__name__, error_detail=error_detail(exc)
+        )

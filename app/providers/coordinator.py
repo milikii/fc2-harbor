@@ -29,7 +29,7 @@ from typing import Literal
 from app.config import Settings
 from app.db.enums import Censorship
 from app.db.models import Content
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.network.clients import HttpClient
 from app.network.proxy import ProxyRouter
 from app.providers.avsox import AvsoxProvider
@@ -278,14 +278,20 @@ class MetadataCoordinator:
                 timeout=fallback.timeout_seconds,
             )
         except Exception as exc:
-            _log.info("metadata.fallback_failed", error_code=type(exc).__name__)
+            _log.info(
+                "metadata.fallback_failed",
+                error_code=type(exc).__name__,
+                error_detail=error_detail(exc),
+            )
             return
         try:
             result = fallback.parse(
                 ProviderPage(url=url, html=page.text, status=page.status), content
             )
         except ProviderError as exc:
-            _log.info("metadata.fallback_failed", error_code=exc.code)
+            _log.info(
+                "metadata.fallback_failed", error_code=exc.code, error_detail=str(exc)[:300]
+            )
             return
         if result is None:
             return

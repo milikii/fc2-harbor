@@ -17,7 +17,7 @@ from app.bots.commands import WhitelistFilter
 from app.bots.keyboards import settled_keyboard
 from app.config import Settings
 from app.db.session import Database
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.services.acceptance import AcceptOutcome, SubscriptionActions
 from app.services.cards import parse_callback
 from app.services.notifications import MessageDeleter
@@ -111,7 +111,11 @@ async def _edit_keyboard(
             )
         )
     except Exception as exc:
-        _log.warning("bot.subscription.keyboard_failed", error_code=type(exc).__name__)
+        _log.warning(
+            "bot.subscription.keyboard_failed",
+            error_code=type(exc).__name__,
+            error_detail=error_detail(exc),
+        )
 
 
 async def _safe_reply(callback: CallbackQuery, text: str) -> None:
@@ -121,4 +125,8 @@ async def _safe_reply(callback: CallbackQuery, text: str) -> None:
     try:
         await message.answer(text)  # type: ignore[union-attr]
     except Exception as exc:
-        _log.warning("bot.subscription.reply_failed", error_code=type(exc).__name__)
+        _log.warning(
+            "bot.subscription.reply_failed",
+            error_code=type(exc).__name__,
+            error_detail=error_detail(exc),
+        )

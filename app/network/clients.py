@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 
 _log = get_logger("network")
 
@@ -202,13 +202,15 @@ class HttpClient:
                     domain=domain,
                     attempt=attempt + 1,
                     error_code=type(exc).__name__,
+                    error_detail=error_detail(exc),
                     latency_ms=int((time.monotonic() - started) * 1000),
                 )
                 if attempt < self._retries:
                     await self._sleep(self._backoff(attempt))
                     continue
                 raise HttpNetworkError(
-                    f"request to {domain} failed: {type(exc).__name__}", url=url
+                    f"request to {domain} failed: {type(exc).__name__}: {error_detail(exc)}",
+                    url=url,
                 ) from exc
 
             latency_ms = int((time.monotonic() - started) * 1000)

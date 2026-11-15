@@ -16,7 +16,7 @@ from app.config import Settings
 from app.db.enums import DownloadStatus
 from app.db.models import AcceptedEntry, BlacklistEntry, Content, DownloadJob
 from app.db.session import Database
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 
 _log = get_logger("api.health")
 
@@ -44,7 +44,11 @@ def create_health_app(
         try:
             await db.ping()
         except Exception as exc:
-            _log.error("health.db_unavailable", error_code=type(exc).__name__)
+            _log.error(
+                "health.db_unavailable",
+                error_code=type(exc).__name__,
+                error_detail=error_detail(exc),
+            )
             return JSONResponse({"status": "degraded", "database": "unavailable"}, status_code=503)
         return JSONResponse({"status": "ready", "database": "ok"})
 

@@ -14,7 +14,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 
 _log = get_logger("supervisor")
 
@@ -75,7 +75,7 @@ class TaskSupervisor:
                     "supervisor.task_failed",
                     task=record.name,
                     error_code=type(exc).__name__,
-                    detail=str(exc)[:300],
+                    error_detail=error_detail(exc),
                     restarts=record.restarts,
                 )
                 if self._stopping or record.restarts >= self.max_restarts:

@@ -21,7 +21,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.db.models import SourceCursor, utcnow
 from app.db.session import Database
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.schemas.release import ReleaseCandidate
 from app.services.releases import RegistrationOutcome, ReleaseRegistrar
 from app.sources.nyaa import DiscoveryStats, NyaaCursor
@@ -110,6 +110,7 @@ class SubscriptionPoller:
                     source=candidate.source,
                     release_id=candidate.source_item_id,
                     error_code=type(exc).__name__,
+                    error_detail=error_detail(exc),
                 )
                 continue
             if result.outcome is RegistrationOutcome.RECORDED:

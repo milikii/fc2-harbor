@@ -21,7 +21,7 @@ from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from app.config import Settings
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.network.proxy import ProxyRouter
 
 _log = get_logger("telegram.bot")
@@ -92,6 +92,7 @@ async def verify_bot(
             "telegram.bot_unreachable",
             bot=name,
             error_code=type(exc).__name__,
+            error_detail=error_detail(exc),
             hint="Bot cannot reach Telegram: check telegram.proxy and network",
         )
         return None

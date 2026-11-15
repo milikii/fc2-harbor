@@ -314,7 +314,8 @@
 - 实现：
   - `notifications` 新增 `delete_error`（迁移 `0004`）保存 Telegram 给的原因；
   - `is_permanent_delete_error()` 按错误文本识别永久失败（`message to delete not found`、`message can't be deleted`、`message is too old`、`not enough rights`、`chat not found`、`bot was blocked by the user` 等）——aiogram 把这类错误都包装成 `TelegramBadRequest`，只看异常类型区分不出来；
-  - 命中永久失败：**立即停止重试**、`report.dropped += 1`、`status=failed` 且写入 `delete_error`，日志 `notifications.delete_permanent_failure`；
+  - `message to delete not found` 单独归类：消息本来就不在了，目标已达成 → 记 `status=deleted` + `deleted_at`、**不写 `delete_error`**、不重试，日志 `notifications.delete_already_gone`；
+  - 其它永久失败：**立即停止重试**、`report.dropped += 1`、`status=failed` 且写入 `delete_error`，日志 `notifications.delete_permanent_failure`；
   - 普通失败仍然重试，3 次后放弃并写入 `delete_error = "gave up after N attempts: <类型>"`。
 - 删除用的 Bot 仍然是发卡片的订阅 Bot（`main.py` 里 `MessageDeleter(bot=subscription_bot)`），没有改动。
 
@@ -328,3 +329,10 @@
   - 无任何措辞依据的行保持 `unknown`（`no_evidence`），不猜。
 - 幂等：第二次运行 `changed=0`（判定与现值相同的行计入 `unchanged`）。
 - 报告 `recensor-report.json` 含每条变化（编号/旧值/新值/依据字段/命中词）与前后分布。
+
+## 41. 日志必须带异常原文（`error_detail`）
+
+- 问题：多处 catch 只记 `type(exc).__name__`，线上只看到 `error_code: TelegramBadRequest`，拿不到 `message to delete not found` 这句；这次是靠运维手动调 API 复现才定位到。
+- 实现：`app/logging.py::error_detail(exc)` —— `str(exc)` 折叠空白、按日志规则脱敏（URL 凭据、Bot token）、截断到 300 字；空消息回退成异常类型名。
+- 已补的日志点：`notifications.*`（retry / gave up / permanent failure）、`notify.telegram_failed`、`subscription.candidate_failed`、`supervisor.task_failed`、`health.db_unavailable`、`nyaa.pagination_failed`、`metadata.fallback_failed`、`telegram.bot_unreachable`、`bot.subscription.keyboard_failed` / `reply_failed`、`bot.edit_failed`、`http.request_failed`。`HttpNetworkError` 的异常文本也带上了原文。
+- 约定：以后新增的外部调用 catch，日志里 `error_code`（类型/错误码）+ `error_detail`（原文）成对出现。

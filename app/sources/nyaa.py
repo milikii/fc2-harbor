@@ -32,7 +32,7 @@ from defusedxml import ElementTree as DefusedElementTree
 from selectolax.lexbor import LexborHTMLParser
 
 from app.config import ConfigError, Settings
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 from app.network.clients import HttpClient, HttpError
 from app.schemas.release import NormalizedContent, ReleaseCandidate
 from app.services.normalize import Fc2CodeRule
@@ -525,7 +525,12 @@ class NyaaSource:
                 extra = await self._fetch_search_page(page)
             except (HttpError, NyaaParseError) as exc:
                 # Catch-up is best effort: the RSS round must still succeed.
-                _log.warning("nyaa.pagination_failed", page=page, error_code=type(exc).__name__)
+                _log.warning(
+                    "nyaa.pagination_failed",
+                    page=page,
+                    error_code=type(exc).__name__,
+                    error_detail=error_detail(exc),
+                )
                 break
             fresh = [item for item in extra if item.item_id not in known]
             collected.extend(fresh)

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 
 _log = get_logger("notify")
 
@@ -50,4 +50,5 @@ class TelegramAdminNotifier:
                     "notify.telegram_failed",
                     chat_id=chat_id,
                     error_code=type(exc).__name__,
+                    error_detail=error_detail(exc),
                 )

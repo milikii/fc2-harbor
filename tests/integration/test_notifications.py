@@ -164,7 +164,9 @@ async def test_permanent_delete_error_stops_after_one_attempt(db: Database) -> N
     assert "can't be deleted" in notification.delete_error
 
 
-async def test_message_already_gone_is_permanent(db: Database) -> None:
+async def test_message_already_gone_counts_as_deleted(db: Database) -> None:
+    """Nothing to delete means the goal is met — not a failure."""
+
     content_id = await seed_content(db)
     async with db.transaction() as session:
         notification = await store.get_or_create(
@@ -178,11 +180,64 @@ async def test_message_already_gone_is_permanent(db: Database) -> None:
 
     report = await deleter.run_once()
 
-    assert report.dropped == 1
+    assert report.deleted == 1
+    assert report.dropped == 0
+    assert report.failed == 0
+    assert bot.calls == 1  # no retry
     async with db.session() as session:
         notification = await session.get(Notification, notification_id)
     assert notification is not None
-    assert notification.delete_error == "Bad Request: message to delete not found"
+    assert notification.status is NotificationStatus.DELETED
+    assert notification.deleted_at is not None
+    assert notification.delete_error is None
+
+
+async def test_already_gone_is_logged_as_success(db: Database) -> None:
+    from structlog.testing import capture_logs
+
+    content_id = await seed_content(db)
+    async with db.transaction() as session:
+        notification = await store.get_or_create(
+            session, content_id=content_id, bot_name="subscription", chat_id=111
+        )
+        notification_id = notification.id
+
+    deleter = MessageDeleter(
+        db=db, bot=FakeBot(fail=True, error="message to delete not found")
+    )
+    deleter.enqueue(chat_id=111, ids=[10], notification_id=notification_id)
+
+    with capture_logs() as logs:
+        await deleter.run_once()
+
+    events = [entry["event"] for entry in logs]
+    assert "notifications.delete_already_gone" in events
+    assert "notifications.delete_permanent_failure" not in events
+
+
+async def test_permanent_failure_logs_the_exception_text(db: Database) -> None:
+    """error_code alone is useless; the Telegram sentence must be in the log."""
+
+    from structlog.testing import capture_logs
+
+    content_id = await seed_content(db)
+    async with db.transaction() as session:
+        notification = await store.get_or_create(
+            session, content_id=content_id, bot_name="subscription", chat_id=111
+        )
+        notification_id = notification.id
+
+    deleter = MessageDeleter(
+        db=db, bot=FakeBot(fail=True, error="Bad Request: message can't be deleted")
+    )
+    deleter.enqueue(chat_id=111, ids=[10], notification_id=notification_id)
+
+    with capture_logs() as logs:
+        await deleter.run_once()
+
+    entry = next(item for item in logs if item["event"] == "notifications.delete_permanent_failure")
+    assert entry["error_code"] == "RuntimeError"
+    assert "can't be deleted" in entry["error_detail"]
 
 
 async def test_transient_error_is_retried_and_the_reason_is_stored(db: Database) -> None:
@@ -211,9 +266,11 @@ async def test_transient_error_is_retried_and_the_reason_is_stored(db: Database)
 
 
 def test_permanent_error_detection() -> None:
-    from app.services.notifications import is_permanent_delete_error
+    from app.services.notifications import is_already_gone, is_permanent_delete_error
 
-    assert is_permanent_delete_error(RuntimeError("message to delete not found"))
+    # "Not found" is a success, not a permanent failure.
+    assert is_already_gone(RuntimeError("Bad Request: message to delete not found"))
+    assert not is_permanent_delete_error(RuntimeError("message to delete not found"))
     assert is_permanent_delete_error(RuntimeError("Bad Request: message can't be deleted"))
     assert is_permanent_delete_error(RuntimeError("message is too old"))
     assert is_permanent_delete_error(RuntimeError("Not enough rights to delete messages"))

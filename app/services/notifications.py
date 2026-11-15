@@ -20,18 +20,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.enums import NotificationStatus
 from app.db.models import Notification, utcnow
 from app.db.session import Database
-from app.logging import get_logger
+from app.logging import error_detail, get_logger
 
 _log = get_logger("notifications")
 
 DELETE_ATTEMPTS = 3
 DELETE_BACKOFF_SECONDS = 5.0
 
+#: The message is not there any more (deleted by the user, or by a previous
+#: attempt): the goal is already met, so this counts as success, not failure.
+ALREADY_GONE_MARKERS: tuple[str, ...] = ("message to delete not found",)
+
 #: Telegram error texts that will never succeed on retry. Matching the message is
 #: deliberate: aiogram turns them all into ``TelegramBadRequest``, so the exception
 #: type alone cannot tell a permanent refusal from a transient one.
 PERMANENT_DELETE_ERRORS: tuple[str, ...] = (
-    "message to delete not found",
     "message can't be deleted",
     "message is too old",
     "message_id_invalid",
@@ -42,8 +45,15 @@ PERMANENT_DELETE_ERRORS: tuple[str, ...] = (
 )
 
 
+def is_already_gone(exc: BaseException) -> bool:
+    """True when the message does not exist any more — deletion already happened."""
+
+    text = str(exc).lower()
+    return any(marker in text for marker in ALREADY_GONE_MARKERS)
+
+
 def is_permanent_delete_error(exc: BaseException) -> bool:
-    """True when retrying cannot help (deleted already, too old, no rights)."""
+    """True when retrying cannot help (too old, no rights, chat gone)."""
 
     text = str(exc).lower()
     return any(marker in text for marker in PERMANENT_DELETE_ERRORS)
@@ -142,6 +152,8 @@ class DeletionTask:
     notification_id: str | None = None
     attempts: int = 0
     last_error: str | None = None
+    #: The exception text, so the log explains *why* without a reproduction.
+    last_error_detail: str | None = None
 
 
 @dataclass(slots=True)
@@ -179,18 +191,31 @@ class MessageDeleter:
         for task in pending:
             failures: list[int] = []
             permanent: str | None = None
+            already_gone: list[int] = []
             for message_id in task.message_ids:
                 try:
                     await self.bot.delete_message(task.chat_id, message_id)  # type: ignore[attr-defined]
                 except Exception as exc:
-                    failures.append(message_id)
                     task.last_error = type(exc).__name__
+                    task.last_error_detail = error_detail(exc)
+                    if is_already_gone(exc):
+                        # Nothing to delete: the card is already gone, which is the
+                        # outcome we wanted. Not a failure, not a retry.
+                        already_gone.append(message_id)
+                        continue
+                    failures.append(message_id)
                     if permanent is None and is_permanent_delete_error(exc):
                         # Telegram will refuse this one forever: stop retrying and
                         # record the reason instead of hammering the API.
                         permanent = _describe_delete_error(exc)
             if not failures:
                 report.deleted += 1
+                if already_gone:
+                    _log.info(
+                        "notifications.delete_already_gone",
+                        notification_id=task.notification_id,
+                        message_ids=already_gone,
+                    )
                 if task.notification_id:
                     async with self.db.transaction() as session:
                         await mark_deleted(session, task.notification_id)
@@ -205,6 +230,7 @@ class MessageDeleter:
                     notification_id=task.notification_id,
                     remaining=len(failures),
                     error_code=task.last_error,
+                    error_detail=task.last_error_detail,
                     reason=permanent,
                 )
                 if task.notification_id:
@@ -220,6 +246,7 @@ class MessageDeleter:
                     notification_id=task.notification_id,
                     remaining=len(failures),
                     error_code=task.last_error,
+                    error_detail=task.last_error_detail,
                 )
                 if task.notification_id:
                     async with self.db.transaction() as session:
@@ -238,6 +265,7 @@ class MessageDeleter:
                 remaining=len(failures),
                 attempts=task.attempts,
                 error_code=task.last_error,
+                error_detail=task.last_error_detail,
             )
         return report
 

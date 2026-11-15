@@ -61,6 +61,24 @@ def redact_text(value: str) -> str:
     return _redact_string(value)
 
 
+#: Exception text is useful, but it can be long and may carry a URL or token.
+ERROR_DETAIL_MAX = 300
+
+
+def error_detail(exc: BaseException, limit: int = ERROR_DETAIL_MAX) -> str:
+    """The exception message, whitespace-collapsed, redacted and truncated.
+
+    Logging only ``type(exc).__name__`` loses the one line that explains the failure
+    (``message to delete not found``), which is exactly what makes an incident
+    diagnosable without reproducing it by hand.
+    """
+
+    text = redact_text(" ".join(str(exc).split()))
+    if not text:
+        return type(exc).__name__
+    return text[:limit]
+
+
 def _redact_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, SecretStr):
         return REDACTED

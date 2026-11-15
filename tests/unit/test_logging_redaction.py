@@ -91,3 +91,35 @@ def test_regular_fields_pass_through() -> None:
     )
     assert event["canonical_key"] == "fc2_ppv:1234567"
     assert event["latency_ms"] == 12
+
+
+def test_error_detail_keeps_the_message_and_redacts_secrets() -> None:
+    """``error_code`` alone is not enough: the sentence is what explains a failure."""
+
+    from app.logging import error_detail
+
+    detail = error_detail(RuntimeError("Bad Request: message to delete not found"))
+    assert detail == "Bad Request: message to delete not found"
+
+    redacted = error_detail(
+        RuntimeError("proxy http://user:secret@192.0.2.1:7890 refused the connection")
+    )
+    assert "secret" not in redacted
+    assert "***:***@" in redacted
+
+    collapsed = error_detail(RuntimeError("line one\n\n   line two"))
+    assert collapsed == "line one line two"
+
+
+def test_error_detail_is_truncated() -> None:
+    from app.logging import ERROR_DETAIL_MAX, error_detail
+
+    detail = error_detail(RuntimeError("x" * 1000))
+    assert len(detail) == ERROR_DETAIL_MAX
+    assert detail == "x" * ERROR_DETAIL_MAX
+
+
+def test_error_detail_falls_back_to_the_type_when_empty() -> None:
+    from app.logging import error_detail
+
+    assert error_detail(RuntimeError("")) == "RuntimeError"
