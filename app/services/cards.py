@@ -26,10 +26,11 @@ CAPTION_SAFETY = 64
 #: Card layout, copied from the legacy system's template (the user's baseline).
 #: HTML parse mode, so every user-supplied string is escaped.
 PARSE_MODE = "HTML"
-#: The caption title is shortened to this many characters *only* when the whole
-#: card does not fit; the complete description/translation then goes out as text
-#: messages, so there is no separate cap on the body.
+#: Caps used *only* when the whole card does not fit in a caption. The complete
+#: description and translation still go out as follow-up text messages, so these
+#: limits never lose text — they only keep the caption readable.
 CARD_TITLE_MAX = 200
+CARD_DESCRIPTION_MAX = 250
 CODE_LINE_TEMPLATE = "<b>{code}</b>"
 TAG_LINE_TEMPLATE = "🏷️ {label}"
 META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
@@ -199,13 +200,33 @@ def link_line(card: CardSource) -> str | None:
 
 
 def compact_caption(card: CardSource) -> str:
-    """The identifying block plus the link — what survives when text overflows."""
+    """The caption used when the full card does not fit.
 
-    caption = identity_block(card, truncated=True)
+    Keeps the identifying block plus a **truncated preview** of the description and
+    translation (200/250 characters, ellipsis visible) and the link. The complete
+    body is sent as follow-up messages by :func:`description_messages`, so the
+    preview never costs a single character of content.
+    """
+
+    blocks = [identity_block(card, truncated=True)]
+    description = clean_description(card.description_ja, limit=CARD_DESCRIPTION_MAX)
+    if description:
+        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
+    translation = clean_description(card.description_zh, limit=CARD_DESCRIPTION_MAX)
+    if translation:
+        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
+
     link = link_line(card)
+    caption = "\n\n".join(blocks)
     if link:
         caption = f"{caption}\n{link}"
-    return caption
+    if len(caption) <= CAPTION_LIMIT - CAPTION_SAFETY:
+        return caption
+
+    # Still too long (a pathological link or size string): drop the previews. The
+    # full text follows as messages anyway, so nothing is lost.
+    caption = identity_block(card, truncated=True)
+    return f"{caption}\n{link}" if link else caption
 
 
 def description_messages(card: CardSource) -> tuple[str, ...]:
@@ -246,9 +267,10 @@ def build_card_messages(card: CardSource) -> CardMessages:
     Policy (spec 9.1 + the user's compact layout):
 
     * everything fits → the caption is the **complete** card, nothing truncated;
-    * it does not fit → the caption keeps the identifying block (title truncated to
-      200 characters, ellipsis visible) plus the link, and the **complete**
-      description and translation follow as text messages. No body text is lost.
+    * it does not fit → the caption keeps the identifying block (title ≤200,
+      description/translation preview ≤250, ellipsis visible) plus the link, and the
+      **complete** description and translation follow as text messages. No body
+      text is lost: the preview only ever duplicates what is sent in full.
     """
 
     description = clean_description(card.description_ja)

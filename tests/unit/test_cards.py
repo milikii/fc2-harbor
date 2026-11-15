@@ -21,6 +21,7 @@ import pytest
 from app.db.enums import Censorship
 from app.services.cards import (
     CAPTION_LIMIT,
+    CARD_DESCRIPTION_MAX,
     CARD_TITLE_MAX,
     PARSE_MODE,
     TEXT_LIMIT,
@@ -200,13 +201,27 @@ def test_a_card_that_fits_is_sent_complete() -> None:
     assert "…" not in messages.caption
 
 
+def test_overflow_caption_keeps_a_truncated_preview() -> None:
+    """Not fitting means 200/250 with a visible ellipsis — not a dropped body."""
+
+    long_ja = "あ" * 2000
+    long_zh = "中" * 2000
+    messages = build_card_messages(card(description_ja=long_ja, description_zh=long_zh))
+
+    preview_ja = messages.caption.split("📝 ")[1].split("\n")[0]
+    preview_zh = messages.caption.split("🇨🇳 ")[1].split("\n")[0]
+    assert len(preview_ja) == CARD_DESCRIPTION_MAX and preview_ja.endswith("…")
+    assert len(preview_zh) == CARD_DESCRIPTION_MAX and preview_zh.endswith("…")
+    assert len(messages.caption) <= CAPTION_LIMIT
+
+
 def test_overflow_sends_the_complete_description_untruncated() -> None:
     long_ja = "あ" * 2000
     messages = build_card_messages(card(description_ja=long_ja, description_zh=None))
 
     assert messages.has_overflow is True
-    # The caption is compact; the body is not truncated anywhere.
-    assert "📝" not in messages.caption
+    # The caption preview is short; the message carries every character.
+    assert len(messages.caption) < len(long_ja)
     assert messages.extra_texts[0] == f"📝 {long_ja}"
 
 
