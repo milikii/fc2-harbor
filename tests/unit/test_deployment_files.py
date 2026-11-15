@@ -147,3 +147,11 @@ def test_decision_log_and_runbook_exist() -> None:
     assert runbook.exists()
     assert "pydantic-settings" in deviations.read_text(encoding="utf-8")
     assert "通过标准" in runbook.read_text(encoding="utf-8")
+
+
+def test_image_contains_the_scripts_directory() -> None:
+    """The one-off importer must be runnable without bind-mounting the source."""
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --chown=app:app scripts ./scripts" in dockerfile
+    assert (ROOT / "scripts" / "import_legacy.py").is_file()

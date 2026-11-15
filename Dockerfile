@@ -41,6 +41,8 @@ RUN HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" NO_PROXY="$NO_PROXY" \
 
 COPY --chown=app:app alembic.ini ./
 COPY --chown=app:app app ./app
+# One-off importer / migration scripts: runnable inside the image.
+COPY --chown=app:app scripts ./scripts
 COPY --chown=app:app docker ./docker
 COPY --chown=app:app docs ./docs
 COPY --chown=app:app README.md LICENSE ./
