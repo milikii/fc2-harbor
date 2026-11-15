@@ -15,6 +15,7 @@ import respx
 from app.db.enums import DownloaderName
 from app.downloaders.base import (
     DownloaderAuthError,
+    DownloaderProtocolError,
     DownloaderRejectedError,
     DownloaderUnavailableError,
 )
@@ -90,6 +91,19 @@ async def test_add_counts_existing_torrent_as_success(respx_mock: respx.MockRout
     respx_mock.get(f"{BASE}/api/v2/torrents/info").respond(200, json=[ENTRY])
 
     handle = await make_client().add(make_request())
+    assert handle.info_hash == HASH
+
+
+@respx.mock(assert_all_called=False)
+async def test_add_with_empty_body_is_accepted(respx_mock: respx.MockRouter) -> None:
+    """qBittorrent 5.x may answer torrents/add with an empty body."""
+
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(204)
+    respx_mock.post(f"{BASE}/api/v2/torrents/add").respond(200, text="")
+    respx_mock.get(f"{BASE}/api/v2/torrents/info").respond(200, json=[])
+
+    handle = await make_client().add(make_request())
+
     assert handle.info_hash == HASH
 
 
@@ -181,6 +195,89 @@ async def test_expired_session_is_reauthenticated_once(respx_mock: respx.MockRou
 
     assert snapshot is not None
     assert login_route.call_count == 2
+
+
+@respx.mock(assert_all_called=False)
+async def test_login_204_is_success_and_the_sid_cookie_is_reused(
+    respx_mock: respx.MockRouter,
+) -> None:
+    """qBittorrent 5.x answers 204 with an empty body plus a QBT_SID cookie."""
+
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(
+        204, headers={"Set-Cookie": "QBT_SID_8085=abc123; path=/"}
+    )
+    info = respx_mock.get(f"{BASE}/api/v2/torrents/info").respond(200, json=[ENTRY])
+
+    client = make_client()
+    try:
+        snapshot = await client.get(
+            DownloadHandle(downloader=DownloaderName.QBITTORRENT, info_hash=HASH)
+        )
+    finally:
+        await client.close()
+
+    assert snapshot is not None
+    cookie = info.calls[0].request.headers.get("cookie", "")
+    assert "QBT_SID_8085=abc123" in cookie
+
+
+@respx.mock(assert_all_called=False)
+async def test_login_200_ok_is_accepted_for_4x(respx_mock: respx.MockRouter) -> None:
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(200, text="Ok.")
+    client = make_client()
+    try:
+        await client.login()
+        assert client._logged_in is True
+    finally:
+        await client.close()
+
+
+@respx.mock(assert_all_called=False)
+async def test_login_401_is_a_credential_error_not_a_ban(
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(401, text="Unauthorized")
+
+    client = make_client()
+    try:
+        with pytest.raises(DownloaderAuthError) as excinfo:
+            await client.login()
+    finally:
+        await client.close()
+    assert excinfo.value.code == "downloader_auth_failed"
+
+
+@respx.mock(assert_all_called=False)
+async def test_login_200_fails_is_bad_credentials(respx_mock: respx.MockRouter) -> None:
+    """4.x reports a wrong password as 200 + "Fails."."""
+
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(200, text="Fails.")
+    client = make_client()
+    try:
+        with pytest.raises(DownloaderAuthError) as excinfo:
+            await client.login()
+    finally:
+        await client.close()
+    assert excinfo.value.code == "downloader_auth_failed"
+
+
+@respx.mock(assert_all_called=False)
+async def test_unexpected_login_body_reports_status_and_size(
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.post(f"{BASE}/api/v2/auth/login").respond(200, text="weird")
+
+    client = make_client()
+    try:
+        with pytest.raises(DownloaderProtocolError) as excinfo:
+            await client.login()
+    finally:
+        await client.close()
+
+    message = str(excinfo.value)
+    assert "status=200" in message
+    assert "body_bytes=5" in message
+    assert excinfo.value.code == "downloader_login_unexpected"
 
 
 @respx.mock(assert_all_called=False)

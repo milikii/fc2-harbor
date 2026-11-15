@@ -110,20 +110,49 @@ class QBittorrentClient:
 
         latency_ms = int((time.monotonic() - started) * 1000)
         body = (response.text or "").strip().lower()
+        status = response.status_code
         _log.info(
             "downloader.login",
             downloader=self.name.value,
             domain=self._domain,
-            status=response.status_code,
+            status=status,
             latency_ms=latency_ms,
+            body_bytes=len(response.content or b""),
         )
-        if response.status_code == 403:
+
+        # Version-compatible success rules:
+        #   qBittorrent 4.x  -> 200 with body "Ok."
+        #   qBittorrent 5.x  -> 204 with an empty body and a QBT_SID cookie
+        # Anything else must fail loudly, with the status and body size, instead of
+        # being mistaken for a credential problem.
+        if status == 403:
             raise DownloaderAuthError(
-                "qBittorrent refused the login (403, IP may be banned)", code="downloader_banned"
+                "qBittorrent refused the login (403, IP may be banned)",
+                code="downloader_banned",
             )
-        if response.status_code >= 400 or body != "ok.":
-            raise DownloaderAuthError(f"qBittorrent login rejected (status={response.status_code})")
-        self._logged_in = True
+        if status >= 400:
+            raise DownloaderAuthError(
+                f"qBittorrent login rejected (status={status})",
+                code="downloader_auth_failed",
+            )
+        if status == 204:
+            # 5.x: success is the empty body plus the session cookie.
+            self._logged_in = True
+            return
+        if status == 200 and body == "ok.":
+            self._logged_in = True
+            return
+        if status == 200 and body == "fails.":
+            # 4.x reports bad credentials with a 200 and this body.
+            raise DownloaderAuthError(
+                "qBittorrent login rejected (status=200, body=Fails.)",
+                code="downloader_auth_failed",
+            )
+        raise DownloaderProtocolError(
+            "unexpected qBittorrent login response: "
+            f"status={status}, body_bytes={len(response.content or b'')}",
+            code="downloader_login_unexpected",
+        )
 
     # -- HTTP ---------------------------------------------------------------
 
@@ -179,13 +208,18 @@ class QBittorrentClient:
         }
         response = await self._request("POST", "/api/v2/torrents/add", data=payload)
         body = (response.text or "").strip().lower()
+        # 4.x answers "Ok." / "Fails."; 5.x may answer with an empty body. Anything
+        # other than an explicit "Fails." counts as accepted, and the presence check
+        # below decides whether the task is really there.
+        rejected = body == "fails."
         _log.info(
             "downloader.add",
             downloader=self.name.value,
             job_id=request.job_id,
             save_path=request.save_path,
             category=request.category,
-            accepted=body == "ok.",
+            accepted=not rejected,
+            body_bytes=len(response.content or b""),
         )
 
         handle = DownloadHandle(
@@ -195,9 +229,9 @@ class QBittorrentClient:
         )
         snapshot = await self._wait_for_torrent(request.info_hash)
         if snapshot is None:
-            if body == "ok.":
-                # qBittorrent accepted the add but the task is not visible yet;
-                # the handle is still valid and the monitor will pick it up.
+            if not rejected:
+                # Accepted but not visible yet; the handle is valid and the monitor
+                # will pick it up on its next tick.
                 return handle
             raise DownloaderRejectedError(
                 "qBittorrent rejected the torrent and it is not present",
