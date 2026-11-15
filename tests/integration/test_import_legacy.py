@@ -89,7 +89,7 @@ def write_fixtures(tmp_path: Path) -> dict[str, Path]:
             "number": "5007848",
             "title": "Done One",
             "info_hash": "d" * 40,
-            "done_at": "2026-11-01T00:00:00Z",
+            "done_at": "2020-11-01T00:00:00Z",
         }
     ]
     claims = [{"number": "5007848"}, {"number": "5007849"}]

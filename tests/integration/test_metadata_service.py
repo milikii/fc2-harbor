@@ -74,7 +74,7 @@ def result(*, previews: list[str]) -> MetadataResult:
         description_ja="作品の説明です。",
         official_url="https://adult.contents.fc2.com/article/1234567/",
         censorship=Censorship.UNCENSORED,
-        release_date=datetime(2026, 11, 1, tzinfo=UTC),
+        release_date=datetime(2020, 11, 1, tzinfo=UTC),
         cover=AssetCandidate(url="https://img.example.com/cover.jpg", provider="Fc2", role="cover"),
         previews=[AssetCandidate(url=url, provider="Fc2", role="preview") for url in previews],
     )

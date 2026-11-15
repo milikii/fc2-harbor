@@ -26,9 +26,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.db.enums import (
     AcceptedOrigin,
@@ -364,12 +365,27 @@ class ContentGate:
             select(Content).where(Content.canonical_key == subject.canonical_key)
         )
         if content is not None:
+            # Filling in a label is bookkeeping, not new metadata, so ``updated_at``
+            # (which means "when the metadata was fetched") must not move. The
+            # column carries an ORM ``onupdate``, so a Core UPDATE pins it to itself.
+            bookkeeping: dict[str, object] = {}
             if not content.display_code and subject.display_code:
-                content.display_code = subject.display_code
+                bookkeeping["display_code"] = subject.display_code
             if not content.title_ja and subject.raw_title:
                 # The release title is a fallback label only; provider metadata
                 # overwrites it in M3.
-                content.title_ja = subject.raw_title
+                bookkeeping["title_ja"] = subject.raw_title
+            if bookkeeping:
+                await session.execute(
+                    update(Content)
+                    .where(Content.id == content.id)
+                    .values(**bookkeeping, updated_at=Content.updated_at)
+                    .execution_options(synchronize_session=False)
+                )
+                # Keep the in-memory row in step without marking it dirty (a dirty
+                # ORM object would flush an UPDATE and bump the timestamp again).
+                for field_name, value in bookkeeping.items():
+                    set_committed_value(content, field_name, value)
             return content
 
         content = Content(

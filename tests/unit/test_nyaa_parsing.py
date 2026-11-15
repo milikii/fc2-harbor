@@ -40,7 +40,7 @@ def test_rss_parses_documented_fields() -> None:
     assert first.title == "FC2-PPV-1234567 Sample Title"
     assert first.uploader == "Uploader A"
     assert first.info_hash == "0123456789abcdef0123456789abcdef01234567"
-    assert first.pub_date == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    assert first.pub_date == datetime(2020, 11, 14, 10, 0, tzinfo=UTC)
     assert first.seeders == 12
     assert first.size_text == "1.2 GiB"
     assert first.category == "Art - Anime"
@@ -88,7 +88,7 @@ def test_search_page_parses_rows_and_magnet() -> None:
     assert first.size_text == "1.2 GiB"
     assert first.seeders == 12
     assert first.category == "Art - Anime"
-    assert first.pub_date == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    assert first.pub_date == datetime(2020, 11, 14, 10, 0, tzinfo=UTC)
 
     # Second row has no magnet link; the hash stays unknown here.
     assert items[1].magnet is None
@@ -170,16 +170,16 @@ def test_realistic_search_markup_still_yields_size_and_seeders() -> None:
     assert [item.item_id for item in items] == ["4761220", "4761221"]
     assert items[0].size_text == "3.4 GiB"
     assert items[0].seeders == 27
-    assert items[0].pub_date == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    assert items[0].pub_date == datetime(2020, 11, 14, 10, 0, tzinfo=UTC)
     assert items[1].size_text == "900.0 MiB"
     assert items[1].seeders == 5
 
 
 def test_parse_http_date() -> None:
-    assert parse_http_date("Sat, 14 Nov 2026 10:00:00 -0000") == datetime(
-        2026, 11, 14, 10, 0, tzinfo=UTC
+    assert parse_http_date("Sat, 14 Nov 2020 10:00:00 -0000") == datetime(
+        2020, 11, 14, 10, 0, tzinfo=UTC
     )
-    assert parse_http_date("2026-11-14T10:00:00Z") == datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    assert parse_http_date("2020-11-14T10:00:00Z") == datetime(2020, 11, 14, 10, 0, tzinfo=UTC)
     assert parse_http_date("not a date") is None
     assert parse_http_date(None) is None
 

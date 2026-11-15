@@ -285,7 +285,7 @@ async def test_updated_at_is_not_touched(db: Database) -> None:
     """``updated_at`` means "when the metadata was fetched", not "when we rescored"."""
 
     content_id = await seed(db, title="【有】作品")
-    stamp = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    stamp = datetime(2020, 11, 1, 12, 0, tzinfo=UTC)
     async with db.transaction() as session:
         content = await session.get(Content, content_id)
         assert content is not None

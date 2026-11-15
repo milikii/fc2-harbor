@@ -337,3 +337,18 @@
 - 实现：`app/logging.py::error_detail(exc)` —— `str(exc)` 折叠空白、按日志规则脱敏（URL 凭据、Bot token）、截断到 300 字；空消息回退成异常类型名。
 - 已补的日志点：`notifications.*`（retry / gave up / permanent failure）、`notify.telegram_failed`、`subscription.candidate_failed`、`supervisor.task_failed`、`health.db_unavailable`、`nyaa.pagination_failed`、`metadata.fallback_failed`、`telegram.bot_unreachable`、`bot.subscription.keyboard_failed` / `reply_failed`、`bot.edit_failed`、`http.request_failed`。`HttpNetworkError` 的异常文本也带上了原文。
 - 约定：以后新增的外部调用 catch，日志里 `error_code`（类型/错误码）+ `error_detail`（原文）成对出现。
+
+## 42. 记账性写入不移动 `updated_at`
+
+- 背景：`contents.updated_at` 是列级 `onupdate=utcnow`，任何 ORM 赋值都会刷新它。除 `recensor.py`（§40）外还有两处纯记账写入被顺带刷了时间：
+  - `ContentGate.ensure_content()` 给已存在但缺 `display_code` / `title_ja` 的 content 补标签；
+  - `ReleaseRegistrar` 首次回填时把 `content.backfilled` 置真——这个每次回填都会动，一改就把 `updated_at` 变成「回填时间」，字段彻底失去参考价值。
+- 实现：两处都改成 Core `update(Content).values(..., updated_at=Content.updated_at).execution_options(synchronize_session=False)`，并用 `set_committed_value()` 同步内存对象（不标脏，避免 ORM flush 再触发 `onupdate`）。
+- 保持不变：`MetadataService._persist_metadata`（enrich 写完）与 `_translate`（写入译文）仍然显式 `updated_at = utcnow()`——那确实是元数据变了。
+- 守卫测试：`tests/integration/test_updated_at.py` 覆盖「补标签/回填/普通登记不改时间」「enrich 与翻译改时间」两条方向。
+
+## 43. 测试里禁止硬编码当前年份的日期
+
+- 背景：连续两次因为测试 fixture 里写死 `2026-11-14` 这类绝对日期，越过 24h 回填窗口后测试开始随机失败（`rss_fc2.xml` 的 `pubDate`、`rss_with_items()` 生成器）。
+- 实现：`tests/unit/test_no_hardcoded_dates.py` 扫描 `tests/` 下所有 `.py/.xml/.html/.json/.txt/.yaml/.md`，凡出现 `YYYY-MM-DD` 或 `datetime(YYYY,` 且年份 ≥ 2026 一律失败，要求改成 `datetime.now(UTC) - timedelta(...)` 或明确的历史年份。
+- 配套改动：nyaa / provider fixtures 的日期统一改成 2020（时间戳字段同步），解析类断言跟着改；守卫测试自己用常量拼字符串，避免自命中。

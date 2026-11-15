@@ -22,9 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.db.enums import GateReason
 from app.db.models import Content, Release
@@ -103,7 +104,16 @@ class ReleaseRegistrar:
         if decision.reason is GateReason.ALLOWED:
             content = await self.gate.ensure_content(session, subject)
             if backfill and not content.backfilled:
-                content.backfilled = True
+                # ``backfilled`` is a bookkeeping flag, not metadata: pinning
+                # ``updated_at`` keeps it meaningful ("when metadata was fetched")
+                # instead of turning it into "when the backfill ran".
+                await session.execute(
+                    update(Content)
+                    .where(Content.id == content.id)
+                    .values(backfilled=True, updated_at=Content.updated_at)
+                    .execution_options(synchronize_session=False)
+                )
+                set_committed_value(content, "backfilled", True)
             release = self._new_release(content.id, candidate)
             session.add(release)
             await session.flush()

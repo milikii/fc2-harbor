@@ -19,7 +19,7 @@ Rules:
   - verified against real pages: `fc2.html` (og:* title/description/cover,
     protocol-relative sample images, site-chrome h1/h2),
     `fc2_article_with_description.html` (structure captured through the Japan
-    proxy on 2026-11-15: the article page carries a truncated `og:description` and
+    proxy in November 2026: the article page carries a truncated `og:description` and
     embeds the full text in `/widget/article/<number>/description?ac=…`. The widget
     path was implemented and then dropped by user request — the adapter now uses
     the meta teaser on purpose. Text is invented, structure is real), `mmtv.html`

@@ -247,7 +247,7 @@ async def test_provider_timeout_is_isolated(tmp_path: Path) -> None:
 
 
 async def test_release_date_and_official_url_are_merged(tmp_path: Path) -> None:
-    released = datetime(2026, 11, 1, tzinfo=UTC)
+    released = datetime(2020, 11, 1, tzinfo=UTC)
     a = FakeProvider("A", result=result("A", release_date=released, official_url="https://a/1"))
 
     aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(

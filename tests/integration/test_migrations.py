@@ -157,7 +157,7 @@ async def test_enum_check_constraint_rejects_unknown_status(db: Database) -> Non
                     "(id, release_id, content_id, downloader, status, category, "
                     " idempotency_key, retry_count, created_at) "
                     "VALUES ('x', :rid, :cid, 'qbittorrent', 'NOT_A_STATUS', 'fc2', "
-                    "'download:x', 0, '2026-01-01')"
+                    "'download:x', 0, '2020-01-01')"
                 ),
                 {"rid": release_id, "cid": content_id},
             )
@@ -190,7 +190,7 @@ def test_upgrade_flags_existing_contents_as_backfilled(tmp_path: Path) -> None:
         connection.execute(
             "INSERT INTO contents (id, content_type, canonical_key, censorship, "
             "metadata_status, created_at, updated_at) VALUES (?, 'fc2', ?, 'unknown', "
-            "'pending', '2026-01-01', '2026-01-01')",
+            "'pending', '2020-01-01', '2020-01-01')",
             (f"c{index}", f"fc2_ppv:{index}"),
         )
     connection.commit()
