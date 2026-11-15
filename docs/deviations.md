@@ -217,8 +217,10 @@
   - 标题（空白折叠，≤200 字，超出加 `…`），下一行 `💾 {大小} · 🕒 {YYYY-MM-DD HH:MM}`，大小取 `releases.raw_payload_json["size"]`，时间按 `app.timezone` 渲染；
   - `📝 {简介}`（空白折叠，≤250 字），`🇨🇳 {译文}`（≤250 字）；
   - `<a href="{nyaa}">nyaa</a>` 作为最后一行，可见文字只有 `nyaa`。
-- 与 §9.1 的偏离：规格书写「正文绝不静默截断」，现在标题 200 字、简介与译文各 250 字截断并显式加 `…`。这是用户明确要求的排版基准（旧系统行为）；截断是**显式**的（省略号可见），完整原文仍保存在数据库里，需要时可查。
-- 超长兜底：整段超过 caption 上限时，caption 只留编号/标签/标题/大小时间/链接，`📝` 与 `🇨🇳` 拆成紧随其后的文本消息（顺序不变），不丢内容。
+- 截断口径（与用户确认的折中，既不违反 §9.1，也满足紧凑排版）：
+  - **整张卡放得进 caption（1024 内）时发完整内容，不截断**；
+  - 放不下时才把 caption 压缩成「编号 / 标签 / 标题（≤200 字，超出加 `…`）/ 大小时间 / 链接」，同时把**完整的简介与译文**作为紧随其后的文本消息发出去（`📝` 一条、`🇨🇳` 一条，各自按 4096 上限分块）；
+  - 因此不再有「简介 250 字上限」这个常量：正文只在独立消息里出现，那里不截断。
 
 ## 29. 卡片使用 HTML parse_mode，所有用户来源文本转义
 
@@ -247,3 +249,13 @@
 
 - 问题：Dockerfile 只 COPY `app/`、`docker/`、`docs/`，运维必须挂载源码才能跑导入器。
 - 实现：`COPY --chown=app:app scripts ./scripts`；`docker compose run --rm app python scripts/import_legacy.py …` 直接可用。
+
+## 33. 整理器：绝不覆盖目标文件 + EXDEV 回退
+
+- 背景：`os.replace` 的语义是**覆盖**。同一编号重新下载（不同画质版本）落到同一目录时会静默毁掉用户已有文件；容器里 `/downloads` 与 `/library` 是两个 bind mount（同一块盘、`st_dev` 相同）时 `rename(2)` 返回 `EXDEV`，原实现直接判 job 失败。
+- 实现（`app/organizer/mover.py`）：
+  - **移动前检查目标**（rename 与 copy 两条路径都做；copy 在 `os.replace(partial, dst)` 之前）：目标不存在 → 正常移动；存在且大小相同 → 跳过并记 `organizer.already_present`（源文件**保留**，因为我们没写过那个目标文件，删源等于赌）；存在但大小不同 → `OrganizeError(stage=CONFLICT)`，任务进 FAILED 报人，目标文件一个字节都不动。
+  - 目录种子逐文件判断，允许部分移动 + 部分跳过，结果里 `moved` / `skipped` 分开列出。
+  - **乐观 rename**：`st_dev` 在容器里不可靠（bind mount 同盘仍 EXDEV），因此先尝试 `os.replace`；捕获 `errno.EXDEV` 时记 `organizer.rename_fallback {reason: "exdev"}` 并回退到复制路径（复制 + fsync + 校验 + 原子改名 + 删源）。其它 `OSError` 仍然按失败处理。
+  - 新增 `MoveStage.CONFLICT`（只出现在错误对象与日志里，不落库，无需迁移）。
+- 理由：任何部署形态（单 mount / 多 bind mount / 真跨盘）都能工作，且慢路径可观测；数据安全优先于「少留一个目录」。

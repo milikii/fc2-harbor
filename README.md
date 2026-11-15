@@ -99,10 +99,11 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
   Resumable after a crash: a pending notification continues from the last recorded
   step.
 - **Cards** (`app/services/cards.py`): the legacy layout — `<b>FC2-PPV-<number></b>`,
-  `🏷️ tag`, title (≤200 chars) with `💾 size · 🕒 time`, `📝` description (≤250),
-  `🇨🇳` translation (≤250), and `<a href="…">nyaa</a>`. HTML parse mode, so every
-  user-supplied string is escaped; overflow beyond the caption limit goes out as
-  separate messages. Short `dl:`/`blk:` callback data.
+  `🏷️ tag`, title with `💾 size · 🕒 time`, `📝` description, `🇨🇳` translation and
+  `<a href="…">nyaa</a>`. HTML parse mode, so every user-supplied string is escaped.
+  A card that fits is sent complete; when it does not fit, the caption is compacted
+  (title ≤200 chars) and the **complete** description/translation follow as text
+  messages — no body text is lost. Short `dl:`/`blk:` callback data.
 - **Buttons** (`app/bots/subscription.py`): download re-checks the gate, writes the
   accepted entry and the job in one transaction, submits to qBittorrent and settles
   the button to 已下载 / 重试; a second click is idempotent. 不感兴趣 writes the

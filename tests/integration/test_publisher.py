@@ -230,8 +230,10 @@ async def test_single_preview_is_sent_as_one_photo(db: Database, tmp_path: Path)
     assert len(bot.photos) == 2
 
 
-async def test_long_description_is_truncated_in_the_card(db: Database, tmp_path: Path) -> None:
-    """The legacy template caps title at 200 and description/translation at 250."""
+async def test_long_content_truncates_the_caption_and_sends_the_full_text(
+    db: Database, tmp_path: Path
+) -> None:
+    """Spec 9.1: the caption is compact, but no body text is lost."""
 
     settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
     content_id = await seed(db, tmp_path)
@@ -249,10 +251,12 @@ async def test_long_description_is_truncated_in_the_card(db: Database, tmp_path:
     caption = bot.photos[0][2]
     assert caption is not None and len(caption) <= 1024
     assert "…" in caption
-    assert "あ" * 260 not in caption
+    assert "あ" * 260 not in caption  # caption keeps only the identifying block
     assert "中" * 260 not in caption
-    # The truncated card still fits, so no follow-up messages are needed.
-    assert bot.messages == []
+    # The complete description and translation follow as text messages.
+    assert len(bot.messages) == 2
+    assert bot.messages[0][1] == f"📝 {'あ' * 2000}"
+    assert bot.messages[1][1] == f"🇨🇳 {'中' * 2000}"
 
 
 async def test_overflow_falls_back_to_follow_up_messages(db: Database, tmp_path: Path) -> None:

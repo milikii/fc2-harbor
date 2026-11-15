@@ -21,7 +21,6 @@ import pytest
 from app.db.enums import Censorship
 from app.services.cards import (
     CAPTION_LIMIT,
-    CARD_DESCRIPTION_MAX,
     CARD_TITLE_MAX,
     PARSE_MODE,
     TEXT_LIMIT,
@@ -190,25 +189,40 @@ def test_escaped_description_still_goes_out_escaped() -> None:
 # -- truncation --------------------------------------------------------------
 
 
-def test_title_is_truncated_to_two_hundred_characters() -> None:
-    caption = build_card_messages(card(title="題" * 500)).caption
-    title_line = caption.splitlines()[3]
+def test_a_card_that_fits_is_sent_complete() -> None:
+    """Spec 9.1: nothing is truncated when the whole card fits in the caption."""
+
+    long_but_fitting = "あ" * 400
+    messages = build_card_messages(card(description_ja=long_but_fitting))
+
+    assert messages.extra_texts == ()
+    assert long_but_fitting in messages.caption
+    assert "…" not in messages.caption
+
+
+def test_overflow_sends_the_complete_description_untruncated() -> None:
+    long_ja = "あ" * 2000
+    messages = build_card_messages(card(description_ja=long_ja, description_zh=None))
+
+    assert messages.has_overflow is True
+    # The caption is compact; the body is not truncated anywhere.
+    assert "📝" not in messages.caption
+    assert messages.extra_texts[0] == f"📝 {long_ja}"
+
+
+def test_overflow_sends_the_complete_translation_untruncated() -> None:
+    long_zh = "中" * 2000
+    messages = build_card_messages(card(description_ja=None, description_zh=long_zh))
+
+    assert messages.has_overflow is True
+    assert messages.extra_texts[0] == f"🇨🇳 {long_zh}"
+
+
+def test_caption_title_is_truncated_when_it_does_not_fit() -> None:
+    messages = build_card_messages(card(title="題" * 2000, description_ja="あ" * 2000))
+    title_line = messages.caption.splitlines()[3]
     assert len(title_line) == CARD_TITLE_MAX
     assert title_line.endswith("…")
-
-
-def test_description_is_truncated_to_two_hundred_fifty_characters() -> None:
-    caption = build_card_messages(card(description_ja="あ" * 500)).caption
-    block = caption.split("📝 ")[1].split("\n")[0]
-    assert len(block) == CARD_DESCRIPTION_MAX
-    assert block.endswith("…")
-
-
-def test_translation_is_truncated_to_two_hundred_fifty_characters() -> None:
-    caption = build_card_messages(card(description_zh="中" * 500)).caption
-    block = caption.split("🇨🇳 ")[1].split("\n")[0]
-    assert len(block) == CARD_DESCRIPTION_MAX
-    assert block.endswith("…")
 
 
 def test_whitespace_is_collapsed_in_the_description() -> None:

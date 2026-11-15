@@ -26,8 +26,10 @@ CAPTION_SAFETY = 64
 #: Card layout, copied from the legacy system's template (the user's baseline).
 #: HTML parse mode, so every user-supplied string is escaped.
 PARSE_MODE = "HTML"
+#: The caption title is shortened to this many characters *only* when the whole
+#: card does not fit; the complete description/translation then goes out as text
+#: messages, so there is no separate cap on the body.
 CARD_TITLE_MAX = 200
-CARD_DESCRIPTION_MAX = 250
 CODE_LINE_TEMPLATE = "<b>{code}</b>"
 TAG_LINE_TEMPLATE = "🏷️ {label}"
 META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
@@ -130,18 +132,20 @@ def truncate(text: str, limit: int) -> str:
     return text[: max(limit - 1, 0)].rstrip() + "…"
 
 
-def clean_title(title: str | None, fallback: str) -> str:
+def clean_title(title: str | None, fallback: str, *, limit: int | None = None) -> str:
     value = collapse_whitespace(title or "")
-    return truncate(value, CARD_TITLE_MAX) if value else fallback
+    if not value:
+        return fallback
+    return truncate(value, limit) if limit else value
 
 
-def clean_description(text: str | None) -> str | None:
+def clean_description(text: str | None, *, limit: int | None = None) -> str | None:
     if not text:
         return None
     value = collapse_whitespace(text)
     if not value:
         return None
-    return truncate(value, CARD_DESCRIPTION_MAX)
+    return truncate(value, limit) if limit else value
 
 
 def format_published_at(value: datetime | None, timezone: str = "Asia/Shanghai") -> str | None:
@@ -176,12 +180,13 @@ def meta_line(card: CardSource) -> str | None:
     return None
 
 
-def identity_block(card: CardSource) -> str:
+def identity_block(card: CardSource, *, truncated: bool = False) -> str:
     """``<b>code</b>``, the tag line, then title + meta — the part that always stays."""
 
     lines = [CODE_LINE_TEMPLATE.format(code=escape_html(card.display_code))]
     lines.append(TAG_LINE_TEMPLATE.format(label=censorship_label(card.censorship)))
-    title = escape_html(clean_title(card.title, card.display_code))
+    limit = CARD_TITLE_MAX if truncated else None
+    title = escape_html(clean_title(card.title, card.display_code, limit=limit))
     meta = meta_line(card)
     block = f"{title}\n{meta}" if meta else title
     return f"{chr(10).join(lines)}\n\n{block}"
@@ -196,7 +201,7 @@ def link_line(card: CardSource) -> str | None:
 def compact_caption(card: CardSource) -> str:
     """The identifying block plus the link — what survives when text overflows."""
 
-    caption = identity_block(card)
+    caption = identity_block(card, truncated=True)
     link = link_line(card)
     if link:
         caption = f"{caption}\n{link}"
@@ -204,7 +209,11 @@ def compact_caption(card: CardSource) -> str:
 
 
 def description_messages(card: CardSource) -> tuple[str, ...]:
-    """``📝`` description and ``🇨🇳`` translation as separate, escaped messages."""
+    """The **complete** description and translation as separate, escaped messages.
+
+    Nothing is truncated here: this is the path that runs when the card did not
+    fit, and spec 9.1 forbids losing body text.
+    """
 
     blocks: list[str] = []
     description = clean_description(card.description_ja)
@@ -234,9 +243,12 @@ def build_card_messages(card: CardSource) -> CardMessages:
         🇨🇳 中文翻译（≤250 字）
         <a href="...">nyaa</a>
 
-    When the whole thing does not fit in a caption the caption keeps the
-    identifying block and the link, and description/translation follow as text
-    messages — nothing is dropped without the reader seeing it.
+    Policy (spec 9.1 + the user's compact layout):
+
+    * everything fits → the caption is the **complete** card, nothing truncated;
+    * it does not fit → the caption keeps the identifying block (title truncated to
+      200 characters, ellipsis visible) plus the link, and the **complete**
+      description and translation follow as text messages. No body text is lost.
     """
 
     description = clean_description(card.description_ja)
