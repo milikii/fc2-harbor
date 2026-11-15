@@ -134,11 +134,13 @@ async def test_one_bad_candidate_does_not_abort_the_round(
     original = poller.registrar.handle
     calls = {"n": 0}
 
-    async def flaky(candidate_obj: ReleaseCandidate, *, actor: str = "source") -> object:
+    async def flaky(
+        candidate_obj: ReleaseCandidate, *, actor: str = "source", backfill: bool = False
+    ) -> object:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("registrar exploded")
-        return await original(candidate_obj, actor=actor)
+        return await original(candidate_obj, actor=actor, backfill=backfill)
 
     poller.registrar.handle = flaky  # type: ignore[method-assign]
 
