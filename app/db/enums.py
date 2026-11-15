@@ -119,4 +119,5 @@ class MoveStage(StrEnum):
     COPY = "copy"
     FSYNC = "fsync"
     VERIFY = "verify"
+    CONFLICT = "conflict"
     CLEANUP = "cleanup"

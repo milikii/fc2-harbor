@@ -58,7 +58,7 @@
 
 - 状态：**已验证**
 - 证据：`tests/unit/test_cards.py::test_card_layout_matches_the_legacy_template`（编号加粗首行、标签行、标题、大小时间、`📝` 简介、`🇨🇳` 译文、`<a>` 链接同处 caption）、`tests/integration/test_publisher.py::test_card_with_cover_and_previews`、`::test_card_shows_size_and_time_from_the_release`
-- 备注：排版基准是旧系统模板（见 `docs/deviations.md` §28）；标题 ≤200 字、简介与译文各 ≤250 字，超出加 `…`；中文简介来自翻译，翻译失败时卡片仍含日文简介与链接（`tests/integration/test_metadata_service.py::test_translation_failure_leaves_description_empty`）。
+- 备注：排版基准是旧系统模板（见 `docs/deviations.md` §28）；放得下就发完整内容，放不下才压缩 caption（标题 ≤200 字）并把完整简介与译文拆成紧随的文本消息；中文简介来自翻译，翻译失败时卡片仍含日文简介与链接（`tests/integration/test_metadata_service.py::test_translation_failure_leaves_description_empty`）。
 
 ## 24.7 预览图组紧随封面/简介消息
 
@@ -108,6 +108,8 @@
   - 未完成不整理：`tests/integration/test_spec_22_3.py::test_files_are_organized_only_after_the_download_completes`、`tests/integration/test_monitor_flow.py::test_incomplete_download_is_never_organized`
   - 完成判定：`tests/unit/test_download_completion.py`（progress/状态/致命态）
   - 两次文件快照一致：`tests/unit/test_stability.py::test_two_identical_observations_are_required`
+  - 同盘走原子 rename、bind mount 的 `EXDEV` 回退复制：`tests/unit/test_mover.py::test_same_filesystem_uses_atomic_rename`、`::test_exdev_falls_back_to_copy_instead_of_failing`、`::test_exdev_fallback_is_logged`
+  - 绝不覆盖目标文件（同大小跳过 / 不同大小冲突）：`tests/unit/test_mover.py::test_rename_skips_a_target_with_the_same_size`、`::test_conflict_leaves_the_target_untouched`、`::test_rename_moves_the_missing_files_of_a_partly_present_directory`
 
 ## 24.14 文件整理成功前绝不删除任务
 

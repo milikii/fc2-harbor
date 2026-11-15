@@ -300,7 +300,9 @@ docker compose run --rm app python scripts/import_legacy.py \
 | 卡片收不到 | 两个 Bot 都先 `/start`；`TELEGRAM_ALLOWED_USER_IDS` 是否含你的 id；`SUBSCRIPTION_BOT_TOKEN` 是否填了 |
 | 卡片收到但按钮点了没反应 | 确认 `app.ready` 里有 `subscription-bot` 任务、`polling_bots` 包含它；按钮回调只会投递给发卡片的 Bot，订阅 Bot 没 poll 就永远收不到 |
 | 容器 healthy 但 Bot 完全没反应 | 看启动日志有没有 `telegram.bot_identity`；有 `telegram.bot_unreachable` 就是连不上（多半是 `telegram.proxy` 没配或代理不通）；`/status` 的 `tasks` 里若 polling 任务是 `dead` 也在这里体现 |
-| `organize_failed` | 目标目录权限/磁盘满/跨盘复制失败；日志有 stage 与路径，源文件与任务都还在，修好后 `/retry <job_id>` |
+| `organize_failed`（stage `conflict`） | 目标目录已有同名但**大小不同**的文件。系统不会覆盖它：确认是要保留旧文件（改名/删掉旧文件）还是放弃这次整理，然后 `/retry <job_id>` |
+| `organize_failed`（其它 stage） | 目标目录权限/磁盘满/跨盘复制失败；日志有 stage 与路径，源文件与任务都还在，修好后 `/retry <job_id>` |
+| 整理很慢、日志有 `organizer.rename_fallback reason=exdev` | `/downloads` 与 `/library` 是同一块盘但不同的 bind mount，内核拒绝 rename，已自动回退复制（慢但正确）。想让 rename 生效就改成单一 mount + `/media` 前缀 |
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
 | `structure` 计数上涨 | 站点改版，按 `docs/deviations.md` §19 的流程补 fixture + 改 selector |
