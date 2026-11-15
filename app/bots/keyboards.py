@@ -33,8 +33,14 @@ def category_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+#: Legacy card buttons carry emoji; the user asked for the same wording.
+DOWNLOAD_BUTTON = "⬇️ 下载"
+BLOCK_BUTTON = "🚫 不感兴趣"
+OFFICIAL_BUTTON = "🔗 FC2 官网"
+
+
 def card_keyboard(
-    content_id: str, official_url: str | None, *, download_label: str = "下载"
+    content_id: str, official_url: str | None, *, download_label: str = DOWNLOAD_BUTTON
 ) -> InlineKeyboardMarkup:
     """Spec 9.2: download, not interested, then the FC2 official page."""
 
@@ -43,11 +49,11 @@ def card_keyboard(
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text=download_label, callback_data=download_callback(content_id)),
-            InlineKeyboardButton(text="不感兴趣", callback_data=block_callback(content_id)),
+            InlineKeyboardButton(text=BLOCK_BUTTON, callback_data=block_callback(content_id)),
         ]
     ]
     if official_url:
-        rows.append([InlineKeyboardButton(text="FC2 官网", url=official_url)])
+        rows.append([InlineKeyboardButton(text=OFFICIAL_BUTTON, url=official_url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -59,6 +65,29 @@ def card_keyboard_after(
     keyboard = card_keyboard(content_id, official_url, download_label=download_label)
     rows = list(keyboard.inline_keyboard)
     rows[0][0] = InlineKeyboardButton(text=download_label, callback_data="noop")
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def settled_keyboard(
+    markup: InlineKeyboardMarkup | None,
+    content_id: str,
+    official_url: str | None,
+    *,
+    download_label: str,
+) -> InlineKeyboardMarkup:
+    """Disable the download button in place, keeping the rest of the card's rows.
+
+    Editing an existing card must not drop the FC2 official-page button, so the
+    markup already attached to the message is the source of truth when present.
+    """
+
+    if markup is None or not markup.inline_keyboard:
+        return card_keyboard_after(
+            content_id, official_url, download_label=download_label
+        )
+    rows = [list(row) for row in markup.inline_keyboard]
+    if rows[0]:
+        rows[0][0] = InlineKeyboardButton(text=download_label, callback_data="noop")
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

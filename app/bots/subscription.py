@@ -14,7 +14,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
 from app.bots.commands import WhitelistFilter
-from app.bots.keyboards import card_keyboard_after
+from app.bots.keyboards import settled_keyboard
 from app.config import Settings
 from app.db.session import Database
 from app.logging import get_logger
@@ -106,7 +106,9 @@ async def _edit_keyboard(
         return
     try:
         await message.edit_reply_markup(  # type: ignore[union-attr]
-            reply_markup=card_keyboard_after(content_id, None, download_label=label)
+            reply_markup=settled_keyboard(
+                getattr(message, "reply_markup", None), content_id, None, download_label=label
+            )
         )
     except Exception as exc:
         _log.warning("bot.subscription.keyboard_failed", error_code=type(exc).__name__)

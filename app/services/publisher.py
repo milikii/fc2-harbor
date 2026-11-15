@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy import select
 
+from app.bots.keyboards import card_keyboard
 from app.config import Settings
 from app.db.enums import AssetRole, MetadataStatus, NotificationStatus
 from app.db.models import Asset, Content, Release
@@ -26,7 +28,7 @@ from app.db.session import Database
 from app.logging import get_logger
 from app.schemas.release import ReleaseCandidate  # noqa: F401  (typing reference)
 from app.services import notifications as notification_store
-from app.services.cards import CardSource, build_card_messages
+from app.services.cards import PARSE_MODE, CardSource, build_card_messages
 from app.services.metadata import MetadataService
 from app.services.push_queue import PushCandidate, find_pending_push_candidates
 from app.services.telegram_assets import TelegramAssetUploader, TelegramUploadError
@@ -155,9 +157,12 @@ class Publisher:
 
         resumed = poster_id is not None
         messages = build_card_messages(card)
+        keyboard = card_keyboard(content_id, card.official_url)
 
         if poster_id is None:
-            poster_id = await self._send_poster(chat_id, card, cover, messages.caption)
+            poster_id = await self._send_poster(
+                chat_id, card, cover, messages.caption, keyboard
+            )
             async with self.db.transaction() as session:
                 await notification_store.record_progress(
                     session, notification_id, poster_message_id=poster_id
@@ -165,7 +170,9 @@ class Publisher:
 
         pending_texts = messages.extra_texts[len(description_ids) :]
         for text in pending_texts:
-            message = await self.bot.send_message(chat_id, text)  # type: ignore[attr-defined]
+            message = await self.bot.send_message(  # type: ignore[attr-defined]
+                chat_id, text, parse_mode=PARSE_MODE
+            )
             description_ids.append(message.message_id)
             async with self.db.transaction() as session:
                 await notification_store.record_progress(
@@ -195,12 +202,22 @@ class Publisher:
         return "resumed" if resumed else "published"
 
     async def _send_poster(
-        self, chat_id: int, card: CardSource, cover: Asset | None, caption: str
+        self,
+        chat_id: int,
+        card: CardSource,
+        cover: Asset | None,
+        caption: str,
+        reply_markup: InlineKeyboardMarkup,
     ) -> int:
         if cover is not None:
             try:
                 sent = await self.uploader.send_photo_message(
-                    self.bot, chat_id, cover, caption=caption
+                    self.bot,
+                    chat_id,
+                    cover,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=PARSE_MODE,
                 )
                 if sent.message_id is not None:
                     return sent.message_id
@@ -209,7 +226,9 @@ class Publisher:
                 _log.warning(
                     "publisher.cover_failed", content_id=card.content_id, error_code=exc.code
                 )
-        message = await self.bot.send_message(chat_id, caption)  # type: ignore[attr-defined]
+        message = await self.bot.send_message(  # type: ignore[attr-defined]
+            chat_id, caption, reply_markup=reply_markup, parse_mode=PARSE_MODE
+        )
         return int(message.message_id)
 
     async def _send_previews(self, chat_id: int, previews: list[Asset]) -> list[int]:
@@ -281,6 +300,15 @@ class Publisher:
             or candidate.source_url
             or f"https://sukebei.nyaa.si/view/{candidate.source_item_id}"
         )
+        # Both values come from the release row already loaded by ``_load``: no
+        # extra query per card.
+        size_text = None
+        published_at = None
+        if release is not None:
+            published_at = release.published_at
+            payload = release.raw_payload_json or {}
+            raw_size = payload.get("size") if isinstance(payload, dict) else None
+            size_text = str(raw_size).strip() if raw_size else None
         return CardSource(
             content_id=content.id,
             canonical_key=content.canonical_key,
@@ -291,6 +319,9 @@ class Publisher:
             censorship=content.censorship,
             nyaa_url=nyaa_url,
             official_url=content.official_url,
+            size_text=size_text,
+            published_at=published_at,
+            timezone=self.settings.app.timezone,
         )
 
     async def _cover_asset(self, content_id: str) -> Asset | None:

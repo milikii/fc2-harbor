@@ -11,7 +11,10 @@ Two hard rules from the spec:
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from app.db.enums import Censorship
 
@@ -19,6 +22,21 @@ CAPTION_LIMIT = 1024
 TEXT_LIMIT = 4096
 #: Room left for the ellipsis/separators when packing caption text.
 CAPTION_SAFETY = 64
+
+#: Card layout, copied from the legacy system's template (the user's baseline).
+#: HTML parse mode, so every user-supplied string is escaped.
+PARSE_MODE = "HTML"
+CARD_TITLE_MAX = 200
+CARD_DESCRIPTION_MAX = 250
+CODE_LINE_TEMPLATE = "<b>{code}</b>"
+TAG_LINE_TEMPLATE = "🏷️ {label}"
+META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
+META_SIZE_ONLY_TEMPLATE = "💾 {size}"
+META_TIME_ONLY_TEMPLATE = "🕒 {published}"
+DESCRIPTION_PREFIX = "📝 "
+ZH_PREFIX = "🇨🇳 "
+LINK_TEMPLATE = '<a href="{url}">nyaa</a>'
+TIME_FORMAT = "%Y-%m-%d %H:%M"
 
 CENSORSHIP_LABELS: dict[Censorship, str] = {
     Censorship.CENSORED: "有码",
@@ -45,6 +63,11 @@ class CardSource:
     censorship: Censorship
     nyaa_url: str
     official_url: str | None
+    #: ``releases.raw_payload_json["size"]`` as stored by the source, e.g. ``3.72 GiB``.
+    size_text: str | None = None
+    #: ``releases.published_at``; rendered in :attr:`timezone`.
+    published_at: datetime | None = None
+    timezone: str = "Asia/Shanghai"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,30 +110,154 @@ def _ensure_short(data: str) -> None:
         raise ValueError(f"callback_data exceeds {CALLBACK_DATA_LIMIT} bytes: {data!r}")
 
 
+def escape_html(text: str) -> str:
+    """Escape text for ``parse_mode=HTML`` — ``<``/``>``/``&`` break the message."""
+
+    return html.escape(text, quote=False)
+
+
+def collapse_whitespace(text: str) -> str:
+    """Fold runs of whitespace (newlines included) into single spaces."""
+
+    return " ".join(text.split())
+
+
+def truncate(text: str, limit: int) -> str:
+    """Cut to ``limit`` characters, marking the cut with an ellipsis."""
+
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def clean_title(title: str | None, fallback: str) -> str:
+    value = collapse_whitespace(title or "")
+    return truncate(value, CARD_TITLE_MAX) if value else fallback
+
+
+def clean_description(text: str | None) -> str | None:
+    if not text:
+        return None
+    value = collapse_whitespace(text)
+    if not value:
+        return None
+    return truncate(value, CARD_DESCRIPTION_MAX)
+
+
+def format_published_at(value: datetime | None, timezone: str = "Asia/Shanghai") -> str | None:
+    """Render a release timestamp as ``YYYY-MM-DD HH:MM`` in the configured zone.
+
+    SQLite hands back naive datetimes; they were written by :func:`app.db.models.utcnow`
+    so a naive value is UTC, not local time.
+    """
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    try:
+        zone = ZoneInfo(timezone)
+    except Exception:  # pragma: no cover - config validates the zone already
+        zone = ZoneInfo("Asia/Shanghai")
+    return value.astimezone(zone).strftime(TIME_FORMAT)
+
+
+def meta_line(card: CardSource) -> str | None:
+    """``💾 size · 🕒 time``, dropping whichever half the release does not have."""
+
+    size = collapse_whitespace(card.size_text or "")
+    published = format_published_at(card.published_at, card.timezone)
+    if size and published:
+        return META_LINE_TEMPLATE.format(size=escape_html(size), published=published)
+    if size:
+        return META_SIZE_ONLY_TEMPLATE.format(size=escape_html(size))
+    if published:
+        return META_TIME_ONLY_TEMPLATE.format(published=published)
+    return None
+
+
+def identity_block(card: CardSource) -> str:
+    """``<b>code</b>``, the tag line, then title + meta — the part that always stays."""
+
+    lines = [CODE_LINE_TEMPLATE.format(code=escape_html(card.display_code))]
+    lines.append(TAG_LINE_TEMPLATE.format(label=censorship_label(card.censorship)))
+    title = escape_html(clean_title(card.title, card.display_code))
+    meta = meta_line(card)
+    block = f"{title}\n{meta}" if meta else title
+    return f"{chr(10).join(lines)}\n\n{block}"
+
+
+def link_line(card: CardSource) -> str | None:
+    if not card.nyaa_url:
+        return None
+    return LINK_TEMPLATE.format(url=html.escape(card.nyaa_url, quote=True))
+
+
+def compact_caption(card: CardSource) -> str:
+    """The identifying block plus the link — what survives when text overflows."""
+
+    caption = identity_block(card)
+    link = link_line(card)
+    if link:
+        caption = f"{caption}\n{link}"
+    return caption
+
+
+def description_messages(card: CardSource) -> tuple[str, ...]:
+    """``📝`` description and ``🇨🇳`` translation as separate, escaped messages."""
+
+    blocks: list[str] = []
+    description = clean_description(card.description_ja)
+    if description:
+        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
+    translation = clean_description(card.description_zh)
+    if translation:
+        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
+    messages: list[str] = []
+    for block in blocks:
+        messages.extend(split_text(block))
+    return tuple(messages)
+
+
 def build_card_messages(card: CardSource) -> CardMessages:
-    """Build the caption and any follow-up text messages (spec 9.1)."""
+    """Build the caption and any follow-up text messages (spec 9.1).
 
-    header_lines = [f"{censorship_label(card.censorship)}｜{card.title or card.display_code}"]
-    header_lines.append(card.display_code)
-    header_lines.append(card.nyaa_url)
-    header = "\n".join(header_lines)
+    Layout (legacy template, HTML parse mode)::
 
-    body_parts: list[str] = []
-    if card.description_ja:
-        body_parts.append(card.description_ja.strip())
-    if card.description_zh:
-        body_parts.append(f"中文：{card.description_zh.strip()}")
-    body = "\n\n".join(part for part in body_parts if part)
+        <b>FC2-PPV-1234567</b>
+        🏷️ 无码
 
-    if not body:
-        return CardMessages(caption=header, extra_texts=())
+        标题（≤200 字）
+        💾 3.72 GiB · 🕒 2025-11-15 03:01
 
-    combined = f"{header}\n\n{body}"
-    if len(combined) <= CAPTION_LIMIT - CAPTION_SAFETY:
-        return CardMessages(caption=combined, extra_texts=())
+        📝 简介（≤250 字）
+        🇨🇳 中文翻译（≤250 字）
+        <a href="...">nyaa</a>
 
-    # Caption keeps the identifying block only; the full text follows separately.
-    return CardMessages(caption=header, extra_texts=tuple(split_text(body)))
+    When the whole thing does not fit in a caption the caption keeps the
+    identifying block and the link, and description/translation follow as text
+    messages — nothing is dropped without the reader seeing it.
+    """
+
+    description = clean_description(card.description_ja)
+    translation = clean_description(card.description_zh)
+
+    blocks = [identity_block(card)]
+    if description:
+        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
+    if translation:
+        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
+
+    link = link_line(card)
+    body = "\n\n".join(blocks)
+    if link:
+        body = f"{body}\n{link}"
+
+    if len(body) <= CAPTION_LIMIT - CAPTION_SAFETY:
+        return CardMessages(caption=body, extra_texts=())
+
+    # Caption keeps the identifying block plus the link; the text follows separately.
+    return CardMessages(caption=compact_caption(card), extra_texts=description_messages(card))
 
 
 def split_text(text: str, limit: int = TEXT_LIMIT) -> list[str]:

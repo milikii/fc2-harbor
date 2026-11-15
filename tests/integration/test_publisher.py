@@ -37,21 +37,41 @@ class FakeBot:
         self.photos: list[tuple[int, object, str | None, int]] = []
         self.messages: list[tuple[int, str, int]] = []
         self.groups: list[tuple[int, list[object], list[int]]] = []
+        #: (kind, reply_markup) for every send, so the card buttons can be asserted.
+        self.markups: list[tuple[str, object]] = []
+        self.parse_modes: list[tuple[str, str | None]] = []
 
     def _next(self) -> int:
         self.counter += 1
         return self.counter
 
-    async def send_photo(self, chat_id: int, photo: object, caption: str | None = None):
+    async def send_photo(
+        self,
+        chat_id: int,
+        photo: object,
+        caption: str | None = None,
+        reply_markup: object | None = None,
+        parse_mode: str | None = None,
+    ):
         message_id = self._next()
         self.photos.append((chat_id, photo, caption, message_id))
+        self.markups.append(("photo", reply_markup))
+        self.parse_modes.append(("photo", parse_mode))
         return SimpleNamespace(
             message_id=message_id, photo=[SimpleNamespace(file_id=f"F{message_id}")]
         )
 
-    async def send_message(self, chat_id: int, text: str):
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: object | None = None,
+        parse_mode: str | None = None,
+    ):
         message_id = self._next()
         self.messages.append((chat_id, text, message_id))
+        self.markups.append(("message", reply_markup))
+        self.parse_modes.append(("message", parse_mode))
         return SimpleNamespace(message_id=message_id)
 
     async def send_media_group(self, chat_id: int, media: list[object]):
@@ -77,6 +97,7 @@ async def seed(db: Database, tmp_path: Path, *, previews: int = 2, cover: bool =
             title_ja="サンプル作品",
             description_ja="作品の説明です。",
             description_zh="作品说明。",
+            official_url="https://adult.contents.fc2.com/article/1234567/",
         )
         session.add(content)
         await session.flush()
@@ -88,7 +109,9 @@ async def seed(db: Database, tmp_path: Path, *, previews: int = 2, cover: bool =
                 source_url="https://sukebei.nyaa.si/view/4761220",
                 magnet=f"magnet:?xt=urn:btih:{HASH}",
                 info_hash=HASH,
-                published_at=datetime.now(UTC),
+                # Fixed so the rendered size/time line is assertable.
+                published_at=datetime(2025, 11, 14, 19, 1, tzinfo=UTC),
+                raw_payload_json={"size": "3.72 GiB", "category": "Video"},
             )
         )
 
@@ -207,12 +230,15 @@ async def test_single_preview_is_sent_as_one_photo(db: Database, tmp_path: Path)
     assert len(bot.photos) == 2
 
 
-async def test_long_description_goes_out_as_extra_messages(db: Database, tmp_path: Path) -> None:
+async def test_long_description_is_truncated_in_the_card(db: Database, tmp_path: Path) -> None:
+    """The legacy template caps title at 200 and description/translation at 250."""
+
     settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
     content_id = await seed(db, tmp_path)
     async with db.transaction() as session:
         content = await session.get(Content, content_id)
         assert content is not None
+        content.title_ja = "題" * 1000
         content.description_ja = "あ" * 2000
         content.description_zh = "中" * 2000
 
@@ -220,11 +246,34 @@ async def test_long_description_goes_out_as_extra_messages(db: Database, tmp_pat
     publisher = build_publisher(db, settings, bot, tmp_path)
     await publisher.publish_once()
 
-    assert bot.messages  # at least one follow-up text message
-    assert all(len(text) <= 4096 for _chat, text, _id in bot.messages)
     caption = bot.photos[0][2]
     assert caption is not None and len(caption) <= 1024
-    assert "FC2-PPV-1234567" in caption
+    assert "…" in caption
+    assert "あ" * 260 not in caption
+    assert "中" * 260 not in caption
+    # The truncated card still fits, so no follow-up messages are needed.
+    assert bot.messages == []
+
+
+async def test_overflow_falls_back_to_follow_up_messages(db: Database, tmp_path: Path) -> None:
+    """Safety net: a pathological link pushes the text out of the caption."""
+
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    content_id = await seed(db, tmp_path)
+    long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
+    async with db.transaction() as session:
+        release = await session.scalar(select(Release).where(Release.content_id == content_id))
+        assert release is not None
+        release.source_url = long_url
+
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+    await publisher.publish_once()
+
+    caption = bot.photos[0][2]
+    assert caption is not None and len(caption) <= 1024
+    assert bot.messages  # 📝 and 🇨🇳 moved out of the caption
+    assert bot.messages[0][1].startswith("📝 ")
 
     async with db.session() as session:
         notification = await session.scalar(
@@ -301,3 +350,152 @@ async def test_resume_after_partial_send(db: Database, tmp_path: Path) -> None:
     assert notification is not None
     assert notification.poster_message_id == 999
     assert notification.status is NotificationStatus.SENT
+
+
+# -- card buttons (spec 9.2) -------------------------------------------------
+
+
+def _assert_card_buttons(markup: object) -> None:
+    """The poster must carry 下载 / 不感兴趣 / FC2 官网, with short callbacks."""
+
+    from aiogram.types import InlineKeyboardMarkup
+
+    assert isinstance(markup, InlineKeyboardMarkup)
+    rows = markup.inline_keyboard
+    assert len(rows) == 2
+    download, block = rows[0]
+    assert download.text == "⬇️ 下载"
+    assert block.text == "🚫 不感兴趣"
+    assert download.callback_data and download.callback_data.startswith("dl:")
+    assert block.callback_data and block.callback_data.startswith("blk:")
+    assert len(download.callback_data.encode()) <= 64
+    assert len(block.callback_data.encode()) <= 64
+    assert rows[1][0].text == "🔗 FC2 官网"
+    assert rows[1][0].url == "https://adult.contents.fc2.com/article/1234567/"
+
+
+async def test_poster_with_cover_carries_the_card_buttons(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert len(bot.photos) == 1
+    assert [kind for kind, _markup in bot.markups] == ["photo"]
+    _assert_card_buttons(bot.markups[0][1])
+
+
+async def test_text_only_poster_carries_the_card_buttons(db: Database, tmp_path: Path) -> None:
+    """Without a cover the caption goes out as a text message — buttons included."""
+
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0, cover=False)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert bot.photos == []
+    assert [kind for kind, _markup in bot.markups] == ["message"]
+    _assert_card_buttons(bot.markups[0][1])
+
+
+async def test_follow_up_text_messages_carry_no_keyboard(db: Database, tmp_path: Path) -> None:
+    """Only the poster owns the buttons; the description messages stay plain."""
+
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
+    async with db.transaction() as session:
+        release = await session.scalar(select(Release).where(Release.content_id == content_id))
+        assert release is not None
+        release.source_url = long_url
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert len(bot.messages) >= 2
+    assert bot.markups[0][1] is not None
+    assert all(markup is None for _kind, markup in bot.markups[1:])
+
+
+async def test_card_shows_size_and_time_from_the_release(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0, cover=False)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert "💾 3.72 GiB · 🕒 2025-11-15 03:01" in caption
+    assert caption.startswith("<b>FC2-PPV-1234567</b>\n🏷️ 未知\n\nサンプル作品")
+
+
+async def test_card_survives_a_release_without_size(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0, cover=False)
+    async with db.transaction() as session:
+        release = await session.scalar(select(Release).where(Release.info_hash == HASH))
+        assert release is not None
+        release.raw_payload_json = {"category": "Video"}
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert "💾" not in caption
+    assert "🕒 2025-11-15 03:01" in caption
+
+
+async def test_card_is_sent_with_html_parse_mode(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert bot.parse_modes == [("photo", "HTML")]
+
+
+async def test_text_only_card_uses_html_parse_mode(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    await seed(db, tmp_path, previews=0, cover=False)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert bot.parse_modes == [("message", "HTML")]
+
+
+async def test_markup_in_content_is_escaped_before_sending(
+    db: Database, tmp_path: Path
+) -> None:
+    """A title with ``<``/``&`` must not break the HTML message."""
+
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.title_ja = "タイトル <b>強調</b> & 100%"
+        content.description_ja = "説明 <i>斜体</i> & 記号"
+        content.description_zh = "翻译 <u>下划线</u> & 符号"
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert "<b>強調</b>" not in caption
+    assert "&lt;b&gt;強調&lt;/b&gt; &amp; 100%" in caption
+    assert "&lt;i&gt;斜体&lt;/i&gt;" in caption
+    assert "&lt;u&gt;下划线&lt;/u&gt;" in caption
+    # Only the code line keeps real markup.
+    assert caption.count("<b>") == 1

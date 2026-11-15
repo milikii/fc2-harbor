@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from app.db.models import Asset
@@ -71,10 +71,19 @@ class TelegramAssetUploader:
         asset: Asset,
         *,
         caption: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        parse_mode: str | None = None,
     ) -> str:
         """Send one asset and return its file_id (cached when possible)."""
 
-        sent = await self.send_photo_message(bot, chat_id, asset, caption=caption)
+        sent = await self.send_photo_message(
+            bot,
+            chat_id,
+            asset,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
         return sent.file_id
 
     async def send_photo_message(
@@ -84,6 +93,8 @@ class TelegramAssetUploader:
         asset: Asset,
         *,
         caption: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        parse_mode: str | None = None,
     ) -> SentPhoto:
         """Send one asset, reusing a cached file_id, and return the message id.
 
@@ -93,7 +104,13 @@ class TelegramAssetUploader:
 
         cached = await self.cached_file_id(asset.sha256 or "")
         if cached:
-            message = await bot.send_photo(chat_id, cached, caption=caption)  # type: ignore[attr-defined]
+            message = await bot.send_photo(  # type: ignore[attr-defined]
+                chat_id,
+                cached,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
             return SentPhoto(file_id=cached, message_id=getattr(message, "message_id", None))
 
         path = Path(asset.local_path or "")
@@ -106,6 +123,8 @@ class TelegramAssetUploader:
             chat_id,
             FSInputFile(str(path)),
             caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
         )
         file_id = _largest_photo_id(message)
         if not file_id:
