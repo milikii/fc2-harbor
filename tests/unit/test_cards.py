@@ -392,3 +392,14 @@ def test_settled_keyboard_without_markup_rebuilds_a_usable_card() -> None:
     )
     assert settled.inline_keyboard[0][0].text == "重试"
     assert settled.inline_keyboard[1][0].url == "https://example.com/official"
+
+
+def test_a_real_length_description_takes_the_follow_up_path() -> None:
+    """A 1673-character FC2 description (a real page) must not be cut to a preview."""
+
+    real_length = "あ" * 1673
+    messages = build_card_messages(card(description_ja=real_length, description_zh=None))
+
+    assert messages.has_overflow is True
+    assert len(messages.caption) <= CAPTION_LIMIT
+    assert messages.extra_texts[0] == f"📝 {real_length}"

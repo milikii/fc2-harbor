@@ -260,3 +260,14 @@
   - **乐观 rename**：`st_dev` 在容器里不可靠（bind mount 同盘仍 EXDEV），因此先尝试 `os.replace`；捕获 `errno.EXDEV` 时记 `organizer.rename_fallback {reason: "exdev"}` 并回退到复制路径（复制 + fsync + 校验 + 原子改名 + 删源）。其它 `OSError` 仍然按失败处理。
   - 新增 `MoveStage.CONFLICT`（只出现在错误对象与日志里，不落库，无需迁移）。
 - 理由：任何部署形态（单 mount / 多 bind mount / 真跨盘）都能工作，且慢路径可观测；数据安全优先于「少留一个目录」。
+
+## 34. Fc2 简介改为抓说明 iframe（og:description 是站点截断的摘要）
+
+- 问题：`og:description` 被官网自己截到约 70 字（实测 `FC2-PPV-5007844` 的 og 值以 `…` 结尾），而文章页里**没有**简介正文——它把正文放在 iframe `/widget/article/<number>/description?ac=<token>` 里。`ac` 每次页面加载都变，必须从文章页当场解析。
+- 实现（`app/providers/fc2.py`）：
+  - `fetch_extra()` 从 `iframe[data-iframe='description']` 取 `src`，带 `Referer` 再抓一次（同一个 `HttpClient` 的 cookie jar 保证 `CONTENTS_FC2_PHPSESSID` 生效，否则 widget 返回「読み込みに失敗しました」）；
+  - widget 里取 `body > div[data-container]`，递归拼接文本（`<br>` → 换行），**跳过**带 `class` 的广告块、`script`/`style`、以及 `display:none` / `opacity:0` / `height:0` 的隐藏追踪节点；
+  - 回退链：widget 全文 → `meta[name=description]` → `og:description`；来源记在 `raw["description_source"] = "full" | "meta" | "og"`；
+  - 空白（含全角空格 U+3000）折叠成单空格，**不截断**——截断只发生在卡片层。
+- 验证：真实页面 `fc2_ppv:5007844` 抓取结果 `description_source="full"`、简介 1673 字（原来 70 字）。fixture 是按真实 DOM 结构脱敏构造的，见 `tests/fixtures/providers/README.md`。
+- 其它 8 个 provider 检查过：只有 Fc2 用 `og:description`；其余取的是搜索结果卡片里的 `.card-text` / `.entry-summary` 等片段，属于「非权威源只补空缺」的定位，不改。

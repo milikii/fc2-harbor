@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 from urllib.parse import urljoin
 
@@ -46,6 +46,9 @@ class ProviderPage:
     url: str
     html: str
     status: int
+    #: Extra documents a provider had to fetch (e.g. FC2's description widget),
+    #: keyed by name. Empty for the providers that only need one page.
+    extra: dict[str, str] = field(default_factory=dict)
 
     @property
     def tree(self) -> LexborHTMLParser:
@@ -236,6 +239,9 @@ class BaseProvider:
             )
 
         page = ProviderPage(url=url, html=response.text, status=response.status)
+        extra = await self.fetch_extra(page, content, ctx)
+        if extra:
+            page = ProviderPage(url=url, html=response.text, status=response.status, extra=extra)
         result = self.parse(page, content)
         latency_ms = int((time.monotonic() - started) * 1000)
         _log.info(
@@ -250,6 +256,17 @@ class BaseProvider:
         if result is None:
             raise ProviderError("not_found", f"{self.id}: no matching entry", http_status=200)
         return result
+
+    async def fetch_extra(
+        self, page: ProviderPage, content: Content, ctx: ProviderContext
+    ) -> dict[str, str]:
+        """Fetch further documents the parser needs (default: none).
+
+        Failures here must be non-fatal: a missing secondary document degrades the
+        result, it never turns a found entry into a miss.
+        """
+
+        return {}
 
     # -- parsing (per provider) --------------------------------------------
 
