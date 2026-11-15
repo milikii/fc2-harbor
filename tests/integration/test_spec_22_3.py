@@ -164,7 +164,9 @@ class FailingDeleteBot:
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
         self.attempts += 1
-        raise RuntimeError("message can't be deleted")
+        # A transient failure (a permanent one is covered by
+        # tests/integration/test_notifications.py: it drops the retry instead).
+        raise RuntimeError("timed out")
 
 
 async def test_not_interested_writes_blacklist_before_deleting_messages(

@@ -296,3 +296,24 @@
   - 报告新增 `by_group`（`transmission` / `transmission_generic`）与每条 action 的 `group` 字段，两类任务不混在一起统计；
   - 无 hash 的任务无法标识 → `missing_hash` 跳过（记在 `transmission_generic` 组）。
 - 迁移 0001 的 `content_type` CHECK 已是 `fc2/jav/generic`，无需新增迁移。
+
+## 38. 有码/无码标签：扩充词表、看标题、记录依据
+
+- 问题：`_censorship_from_text()` 只认 `無修正` / `uncensored` / `有修正` / `修正あり` / `censored`，而 FC2 与 Nyaa 标题大量用 `【無】` / `【有】` / `【薄】`、`モザイク`、`薄修正`，且旧实现只看官网页面正文，命中率极低，全部落到 `UNKNOWN`。
+- 实现（`app/providers/base.py::infer_censorship`）：
+  - 词表：无码 `【無】`/`【无】`/`無修正`/`无修正`/`無碼`/`无码`/`uncensored`；有码 `【有】`/`有修正`/`修正あり`/`censored`/`有碼`/`有码`；薄码 `【薄】`/`薄修正`/`薄码`/`薄碼`；`モザイク` 判 **CENSORED**（拿不准时不用 THIN）；
+  - 匹配前做 NFKC（全角→半角）+ 小写归一化；
+  - 判定范围：FC2 标题、简介、**Nyaa 种子标题**（新增 `ProviderContext.release_title` → `ProviderPage.release_title`）与页面正文，四个字段一起看；
+  - 依据写进 `raw["censorship_evidence"]`：`{"matches": [{field, token, verdict, excerpt}], "conflict": bool}`，排查时能看到是哪个字段的哪个词导致的；
+  - 同一文本里同时出现「无码」和「有码/薄码」措辞 → 判 `UNKNOWN` 并置 `conflict: true`（与跨 provider 冲突的既有逻辑一致，都是宁可标未知也不猜）。
+- 注意：`contents.censorship` 只在当前为 `UNKNOWN` 时才会被 enrich 覆盖，因此**已经入库的历史内容不会被自动重判**，需要重新 enrich 才会更新（统计口径见交付报告）。
+
+## 39. 删除卡片永久失败要落库并停止重试
+
+- 背景：Telegram 对超过 48 小时的消息、已被删除的消息、无权限的 Bot 会永久拒绝删除；旧实现把它当普通失败重试 3 次后只打日志，`notifications` 表里看不出原因。
+- 实现：
+  - `notifications` 新增 `delete_error`（迁移 `0004`）保存 Telegram 给的原因；
+  - `is_permanent_delete_error()` 按错误文本识别永久失败（`message to delete not found`、`message can't be deleted`、`message is too old`、`not enough rights`、`chat not found`、`bot was blocked by the user` 等）——aiogram 把这类错误都包装成 `TelegramBadRequest`，只看异常类型区分不出来；
+  - 命中永久失败：**立即停止重试**、`report.dropped += 1`、`status=failed` 且写入 `delete_error`，日志 `notifications.delete_permanent_failure`；
+  - 普通失败仍然重试，3 次后放弃并写入 `delete_error = "gave up after N attempts: <类型>"`。
+- 删除用的 Bot 仍然是发卡片的订阅 Bot（`main.py` 里 `MessageDeleter(bot=subscription_bot)`），没有改动。

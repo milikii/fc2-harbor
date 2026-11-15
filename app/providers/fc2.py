@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
-from app.db.enums import Censorship
 from app.db.models import Content
 from app.providers.base import (
     BaseProvider,
@@ -22,6 +21,7 @@ from app.providers.base import (
     content_number,
     first_attr,
     first_text,
+    infer_censorship,
     meta_content,
 )
 from app.schemas.metadata import MetadataResult
@@ -75,7 +75,16 @@ class Fc2Provider(BaseProvider):
         ]
         released = first_attr(tree, ("time[datetime]", "time"), "datetime")
         release_date = _parse_date(released)
-        censorship = _censorship_from_text(tree.text(separator=" ", strip=True))
+        # The tag is usually only in the title (``【無】`` / ``【有】`` / ``【薄】``),
+        # which the old page-text-only check never saw.
+        censorship, censorship_evidence = infer_censorship(
+            {
+                "title": title,
+                "description": description,
+                "release_title": page.release_title,
+                "page": tree.text(separator=" ", strip=True),
+            }
+        )
 
         return self._result(
             content,
@@ -92,6 +101,8 @@ class Fc2Provider(BaseProvider):
                 "matched": True,
                 # "meta" (longer teaser) / "og" (site-truncated to ~70 chars) / None.
                 "description_source": description_source,
+                # Which wording produced the tag, and from which field.
+                "censorship_evidence": censorship_evidence,
             },
         )
 
@@ -117,14 +128,3 @@ def _parse_date(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _censorship_from_text(text: str) -> Censorship | None:
-    """Only trust explicit wording; never infer from a filename (spec 7.3)."""
-
-    lowered = text.lower()
-    if "無修正" in text or "uncensored" in lowered:
-        return Censorship.UNCENSORED
-    if "有修正" in text or "修正あり" in text or "censored" in lowered:
-        return Censorship.CENSORED
-    return None

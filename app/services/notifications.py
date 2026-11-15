@@ -27,6 +27,27 @@ _log = get_logger("notifications")
 DELETE_ATTEMPTS = 3
 DELETE_BACKOFF_SECONDS = 5.0
 
+#: Telegram error texts that will never succeed on retry. Matching the message is
+#: deliberate: aiogram turns them all into ``TelegramBadRequest``, so the exception
+#: type alone cannot tell a permanent refusal from a transient one.
+PERMANENT_DELETE_ERRORS: tuple[str, ...] = (
+    "message to delete not found",
+    "message can't be deleted",
+    "message is too old",
+    "message_id_invalid",
+    "not enough rights",
+    "chat not found",
+    "bot was blocked by the user",
+    "user is deactivated",
+)
+
+
+def is_permanent_delete_error(exc: BaseException) -> bool:
+    """True when retrying cannot help (deleted already, too old, no rights)."""
+
+    text = str(exc).lower()
+    return any(marker in text for marker in PERMANENT_DELETE_ERRORS)
+
 
 async def get_or_create(
     session: AsyncSession, *, content_id: str, bot_name: str, chat_id: int
@@ -89,10 +110,14 @@ async def mark_deleted(session: AsyncSession, notification_id: str) -> None:
         notification.deleted_at = utcnow()
 
 
-async def mark_failed(session: AsyncSession, notification_id: str) -> None:
+async def mark_failed(
+    session: AsyncSession, notification_id: str, *, reason: str | None = None
+) -> None:
     notification = await session.get(Notification, notification_id)
     if notification is not None:
         notification.status = NotificationStatus.FAILED
+        if reason:
+            notification.delete_error = reason[:255]
 
 
 async def load_notification(session: AsyncSession, notification_id: str) -> Notification | None:
@@ -153,12 +178,17 @@ class MessageDeleter:
         self.queue.clear()
         for task in pending:
             failures: list[int] = []
+            permanent: str | None = None
             for message_id in task.message_ids:
                 try:
                     await self.bot.delete_message(task.chat_id, message_id)  # type: ignore[attr-defined]
                 except Exception as exc:
                     failures.append(message_id)
                     task.last_error = type(exc).__name__
+                    if permanent is None and is_permanent_delete_error(exc):
+                        # Telegram will refuse this one forever: stop retrying and
+                        # record the reason instead of hammering the API.
+                        permanent = _describe_delete_error(exc)
             if not failures:
                 report.deleted += 1
                 if task.notification_id:
@@ -168,6 +198,21 @@ class MessageDeleter:
 
             task.message_ids = failures
             task.attempts += 1
+            if permanent is not None:
+                report.dropped += 1
+                _log.error(
+                    "notifications.delete_permanent_failure",
+                    notification_id=task.notification_id,
+                    remaining=len(failures),
+                    error_code=task.last_error,
+                    reason=permanent,
+                )
+                if task.notification_id:
+                    async with self.db.transaction() as session:
+                        await mark_failed(
+                            session, task.notification_id, reason=permanent
+                        )
+                continue
             if task.attempts >= self.max_attempts:
                 report.dropped += 1
                 _log.error(
@@ -178,7 +223,11 @@ class MessageDeleter:
                 )
                 if task.notification_id:
                     async with self.db.transaction() as session:
-                        await mark_failed(session, task.notification_id)
+                        await mark_failed(
+                            session,
+                            task.notification_id,
+                            reason=f"gave up after {task.attempts} attempts: {task.last_error}",
+                        )
                 continue
 
             report.failed += 1
@@ -205,6 +254,15 @@ class MessageDeleter:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
             except TimeoutError:
                 continue
+
+
+def _describe_delete_error(exc: BaseException) -> str:
+    """A short, storable reason: the Telegram text, trimmed."""
+
+    text = " ".join(str(exc).split())
+    if not text:
+        return type(exc).__name__
+    return text[:255]
 
 
 def latest_deleted_at(notification: Notification) -> datetime | None:

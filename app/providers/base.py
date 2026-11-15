@@ -14,13 +14,15 @@ from __future__ import annotations
 import html
 import re
 import time
-from collections.abc import Iterable
+import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 from urllib.parse import urljoin
 
 from selectolax.lexbor import LexborHTMLParser
 
+from app.db.enums import Censorship
 from app.db.models import Content
 from app.logging import get_logger
 from app.network.clients import HttpClient, HttpError
@@ -47,6 +49,9 @@ class ProviderPage:
     url: str
     html: str
     status: int
+    #: The release title (e.g. the Nyaa torrent title) the lookup started from.
+    #: Providers may use it as evidence for the censorship tag.
+    release_title: str | None = None
     #: Extra documents a provider had to fetch (e.g. FC2's description widget),
     #: keyed by name. Empty for the providers that only need one page.
     extra: dict[str, str] = field(default_factory=dict)
@@ -110,6 +115,92 @@ def clean_text(value: str | None) -> str | None:
         return None
     text = " ".join(html.unescape(value).split())
     return text or None
+
+
+#: Explicit wording only (spec 7.3) — never inferred from a filename. FC2 and Nyaa
+#: titles use the short forms ``【無】`` / ``【有】`` / ``【薄】`` far more often than
+#: the long ones, which is why the tag used to be UNKNOWN almost always.
+#: ``モザイク`` means mosaic censoring; when in doubt it is CENSORED, never THIN.
+CENSORSHIP_TOKENS: tuple[tuple[str, Censorship], ...] = (
+    ("無修正", Censorship.UNCENSORED),
+    ("无修正", Censorship.UNCENSORED),
+    ("無碼", Censorship.UNCENSORED),
+    ("无码", Censorship.UNCENSORED),
+    ("【無】", Censorship.UNCENSORED),
+    ("【无】", Censorship.UNCENSORED),
+    ("uncensored", Censorship.UNCENSORED),
+    ("薄修正", Censorship.THIN),
+    ("薄码", Censorship.THIN),
+    ("薄碼", Censorship.THIN),
+    ("【薄】", Censorship.THIN),
+    ("有修正", Censorship.CENSORED),
+    ("修正あり", Censorship.CENSORED),
+    ("有碼", Censorship.CENSORED),
+    ("有码", Censorship.CENSORED),
+    ("【有】", Censorship.CENSORED),
+    ("censored", Censorship.CENSORED),
+    ("モザイク", Censorship.CENSORED),
+)
+#: When one text yields several tags, the more specific one wins.
+_CENSORSHIP_PRECEDENCE = (
+    Censorship.UNCENSORED,
+    Censorship.THIN,
+    Censorship.CENSORED,
+)
+
+
+def normalise_for_match(value: str) -> str:
+    """NFKC (full-width → half-width) + lowercase, for token matching."""
+
+    return unicodedata.normalize("NFKC", value).lower()
+
+
+def infer_censorship(
+    fields: Mapping[str, str | None],
+) -> tuple[Censorship | None, dict[str, object]]:
+    """Read the censorship tag from explicit wording in several fields.
+
+    ``fields`` maps a source name (``title`` / ``description`` / ``release_title`` /
+    ``page``) to its text. Returns the verdict plus the evidence that produced it, so
+    a tag can always be explained afterwards.
+    """
+
+    matches: list[dict[str, str]] = []
+    verdicts: set[Censorship] = set()
+    for field_name, value in fields.items():
+        if not value:
+            continue
+        normalised = normalise_for_match(value)
+        for token, verdict in CENSORSHIP_TOKENS:
+            index = normalised.find(normalise_for_match(token))
+            if index < 0:
+                continue
+            start = max(0, index - 12)
+            matches.append(
+                {
+                    "field": field_name,
+                    "token": token,
+                    "verdict": verdict.value,
+                    "excerpt": value[start : index + len(token) + 12].strip(),
+                }
+            )
+            verdicts.add(verdict)
+            break
+
+    evidence: dict[str, object] = {"matches": matches, "conflict": False}
+    if not verdicts:
+        return None, evidence
+    if Censorship.UNCENSORED in verdicts and (
+        Censorship.CENSORED in verdicts or Censorship.THIN in verdicts
+    ):
+        # Both "uncensored" and a censored wording: refuse to pick a winner.
+        evidence["conflict"] = True
+        evidence["verdicts"] = sorted(item.value for item in verdicts)
+        return Censorship.UNKNOWN, evidence
+    for candidate in _CENSORSHIP_PRECEDENCE:
+        if candidate in verdicts:
+            return candidate, evidence
+    return None, evidence  # pragma: no cover - every verdict is in the list
 
 
 def meta_content(tree: Queryable, *names: str) -> str | None:
@@ -250,10 +341,21 @@ class BaseProvider:
                 "http_error", f"{self.id}: status {response.status}", http_status=response.status
             )
 
-        page = ProviderPage(url=url, html=response.text, status=response.status)
+        page = ProviderPage(
+            url=url,
+            html=response.text,
+            status=response.status,
+            release_title=ctx.release_title,
+        )
         extra = await self.fetch_extra(page, content, ctx)
         if extra:
-            page = ProviderPage(url=url, html=response.text, status=response.status, extra=extra)
+            page = ProviderPage(
+                url=url,
+                html=response.text,
+                status=response.status,
+                release_title=ctx.release_title,
+                extra=extra,
+            )
         result = self.parse(page, content)
         latency_ms = int((time.monotonic() - started) * 1000)
         _log.info(

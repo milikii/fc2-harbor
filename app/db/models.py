@@ -360,6 +360,9 @@ class Notification(Base):
         DateTime(timezone=True), nullable=False, default=utcnow
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Why the last deletion attempt failed permanently (Telegram's reason), so a
+    #: stuck card is explainable without digging through logs.
+    delete_error: Mapped[str | None] = mapped_column(String(255))
 
     __table_args__ = (Index("ix_notifications_content_id", "content_id"),)
 

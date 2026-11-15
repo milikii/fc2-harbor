@@ -74,3 +74,5 @@ class ProviderContext(BaseModel):
     #: The release the content came from, used by the Nyaa fallback (spec 7.2).
     release_url: str | None = None
     release_item_id: str | None = None
+    #: The release title (e.g. the Nyaa torrent title); evidence for the tag.
+    release_title: str | None = None

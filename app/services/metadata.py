@@ -172,6 +172,7 @@ class MetadataService:
             max_previews=self.settings.image_fetch.max_previews,
             release_url=release.source_url if release else None,
             release_item_id=release.source_item_id if release else None,
+            release_title=release.raw_title if release else None,
         )
 
     # -- persistence --------------------------------------------------------

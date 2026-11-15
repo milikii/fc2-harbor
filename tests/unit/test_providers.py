@@ -476,3 +476,108 @@ def test_title_entities_are_decoded_before_matching() -> None:
     )
     assert result is not None
     assert result.title_ja == '"衝撃" 作品'
+
+
+# -- censorship tag: short forms, title evidence, conflicts --------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("【無】素人作品", Censorship.UNCENSORED),
+        ("【无】素人作品", Censorship.UNCENSORED),
+        ("無修正 作品", Censorship.UNCENSORED),
+        ("无修正 作品", Censorship.UNCENSORED),
+        ("無碼 作品", Censorship.UNCENSORED),
+        ("UNCENSORED 作品", Censorship.UNCENSORED),
+        ("【有】素人作品", Censorship.CENSORED),
+        ("有修正 作品", Censorship.CENSORED),
+        ("修正あり 作品", Censorship.CENSORED),
+        ("Censored 作品", Censorship.CENSORED),
+        ("有碼 作品", Censorship.CENSORED),
+        ("【薄】素人作品", Censorship.THIN),
+        ("薄修正 作品", Censorship.THIN),
+        # Mosaic is censored, never thin when it is the only evidence.
+        ("モザイク処理 作品", Censorship.CENSORED),
+        ("素人作品", None),
+    ],
+)
+def test_censorship_vocabulary(text: str, expected: Censorship | None) -> None:
+    from app.providers.base import infer_censorship
+
+    verdict, evidence = infer_censorship({"title": text})
+    assert verdict is expected
+    if expected is None:
+        assert evidence["matches"] == []
+    else:
+        assert evidence["matches"]
+
+
+def test_censorship_normalises_fullwidth_and_case() -> None:
+    from app.providers.base import infer_censorship
+
+    verdict, _ = infer_censorship({"title": "ＵＮＣＥＮＳＯＲＥＤ　作品"})
+    assert verdict is Censorship.UNCENSORED
+
+
+def test_censorship_reads_the_release_title() -> None:
+    """The tag usually lives in the Nyaa title, not on the FC2 page."""
+
+    html_page = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品">'
+        '<meta name="description" content="説明文です。">'
+        "</head><body><p>サンプル</p></body></html>"
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(
+            url="https://adult.contents.fc2.com/article/1234567/",
+            html=html_page,
+            status=200,
+            release_title="FC2-PPV-1234567 【無】作品",
+        ),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.censorship is Censorship.UNCENSORED
+    evidence = result.raw["censorship_evidence"]
+    assert evidence["matches"][0]["field"] == "release_title"
+    assert evidence["matches"][0]["token"] == "【無】"
+
+
+def test_censorship_conflict_becomes_unknown_with_evidence() -> None:
+    html_page = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 【無】作品">'
+        '<meta name="description" content="説明文です。">'
+        "</head><body><p>この作品は有修正です。</p></body></html>"
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(
+            url="https://adult.contents.fc2.com/article/1234567/", html=html_page, status=200
+        ),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.censorship is Censorship.UNKNOWN
+    evidence = result.raw["censorship_evidence"]
+    assert evidence["conflict"] is True
+    fields = {item["field"] for item in evidence["matches"]}
+    assert {"title", "page"} <= fields
+
+
+def test_censorship_evidence_is_recorded_even_when_it_misses() -> None:
+    html_page = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品">'
+        "</head><body></body></html>"
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(
+            url="https://adult.contents.fc2.com/article/1234567/", html=html_page, status=200
+        ),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.censorship is None
+    assert result.raw["censorship_evidence"] == {"matches": [], "conflict": False}

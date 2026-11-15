@@ -356,9 +356,9 @@ def test_download_button_labels() -> None:
     from app.bots.subscription import DOWNLOAD_LABELS
     from app.services.acceptance import AcceptOutcome
 
-    assert DOWNLOAD_LABELS[AcceptOutcome.SUBMITTED] == "已下载"
-    assert DOWNLOAD_LABELS[AcceptOutcome.ALREADY] == "已下载"
-    assert DOWNLOAD_LABELS[AcceptOutcome.FAILED] == "重试"
+    assert DOWNLOAD_LABELS[AcceptOutcome.SUBMITTED] == "✅ 已下载"
+    assert DOWNLOAD_LABELS[AcceptOutcome.ALREADY] == "✅ 已下载"
+    assert DOWNLOAD_LABELS[AcceptOutcome.FAILED] == "🔄 重试"
     assert DOWNLOAD_LABELS[AcceptOutcome.BLACKLISTED] == "已拉黑"
 
 

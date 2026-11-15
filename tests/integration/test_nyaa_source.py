@@ -5,6 +5,8 @@ No real request is made: every response comes from respx or a static fixture.
 
 from __future__ import annotations
 
+import itertools
+import re
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -20,6 +22,22 @@ from tests.support import make_settings
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "nyaa"
 RSS_FIXTURE = (FIXTURES / "rss_fc2.xml").read_bytes()
+_PUBDATE_RE = re.compile(r"<pubDate>[^<]*</pubDate>")
+
+
+def rss_fixture() -> bytes:
+    """The static RSS fixture with its pubDates moved to "recently".
+
+    The file carries absolute dates, so a wall-clock lookback window silently drops
+    every item once the fixture is older than ``initial_lookback_hours``.
+    """
+
+    counter = itertools.count()
+    def replace(_match: re.Match[str]) -> str:
+        stamp = datetime.now(UTC) - timedelta(minutes=5 * next(counter) + 5)
+        return f"<pubDate>{format_datetime(stamp)}</pubDate>"
+
+    return _PUBDATE_RE.sub(replace, RSS_FIXTURE.decode("utf-8")).encode("utf-8")
 SEARCH_FIXTURE = (FIXTURES / "search_page1.html").read_bytes()
 ERROR_FIXTURE = (FIXTURES / "error_page.html").read_bytes()
 
@@ -63,7 +81,7 @@ async def test_discover_maps_fc2_items_and_filters_the_rest(
     respx_mock: respx.MockRouter, tmp_path: Path
 ) -> None:
     settings = make_settings(tmp_path, nyaa={"trackers": ["udp://tracker.example:6969/announce"]})
-    respx_mock.get(rss_url(settings)).respond(200, content=RSS_FIXTURE)
+    respx_mock.get(rss_url(settings)).respond(200, content=rss_fixture())
 
     source = NyaaSource(settings=settings)
     try:
@@ -97,7 +115,7 @@ async def test_etag_is_sent_and_304_returns_no_candidates(
     settings = make_settings(tmp_path)
     route = respx_mock.get(rss_url(settings)).mock(
         side_effect=[
-            httpx.Response(200, content=RSS_FIXTURE, headers={"ETag": '"v1"'}),
+            httpx.Response(200, content=rss_fixture(), headers={"ETag": '"v1"'}),
             httpx.Response(304),
         ]
     )
@@ -231,7 +249,7 @@ async def test_broken_search_page_does_not_produce_fake_candidates(
 @respx.mock(assert_all_called=False)
 async def test_user_agent_is_sent(respx_mock: respx.MockRouter, tmp_path: Path) -> None:
     settings = make_settings(tmp_path, nyaa={"user_agent": "fc2-harbor-test/9.9"})
-    route = respx_mock.get(rss_url(settings)).respond(200, content=RSS_FIXTURE)
+    route = respx_mock.get(rss_url(settings)).respond(200, content=rss_fixture())
 
     source = NyaaSource(settings=settings)
     try:

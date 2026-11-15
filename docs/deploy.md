@@ -303,6 +303,7 @@ docker compose run --rm app python scripts/import_legacy.py \
 | `downloader_login_unexpected` | 登录返回了既不是 204 也不是 `Ok.` 的响应，日志里有 `status` 与 `body_bytes`，按 qB 版本核对 |
 | `downloader_unreachable` | 容器访问不到 `QBITTORRENT_URL`；用 `docker compose exec app wget -qO- <url>` 试 |
 | 卡片收不到 | 两个 Bot 都先 `/start`；`TELEGRAM_ALLOWED_USER_IDS` 是否含你的 id；`SUBSCRIPTION_BOT_TOKEN` 是否填了 |
+| 点了「不感兴趣」但卡片没删掉 | 查 `notifications.delete_error`：`message can't be deleted` / `message is too old` 是 Telegram 限制（超过 48 小时不能删），`not enough rights` 是 Bot 权限，`message to delete not found` 是已经删过。这类永久失败已停止重试，黑名单仍然生效 |
 | 卡片收到但按钮点了没反应 | 确认 `app.ready` 里有 `subscription-bot` 任务、`polling_bots` 包含它；按钮回调只会投递给发卡片的 Bot，订阅 Bot 没 poll 就永远收不到 |
 | 容器 healthy 但 Bot 完全没反应 | 看启动日志有没有 `telegram.bot_identity`；有 `telegram.bot_unreachable` 就是连不上（多半是 `telegram.proxy` 没配或代理不通）；`/status` 的 `tasks` 里若 polling 任务是 `dead` 也在这里体现 |
 | `organize_failed`（stage `conflict`） | 目标目录已有同名但**大小不同**的文件。系统不会覆盖它：确认是要保留旧文件（改名/删掉旧文件）还是放弃这次整理，然后 `/retry <job_id>` |

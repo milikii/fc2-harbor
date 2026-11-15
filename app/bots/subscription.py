@@ -25,10 +25,10 @@ from app.services.notifications import MessageDeleter
 _log = get_logger("bot.subscription")
 
 DOWNLOAD_LABELS = {
-    AcceptOutcome.SUBMITTED: "已下载",
-    AcceptOutcome.ALREADY: "已下载",
+    AcceptOutcome.SUBMITTED: "✅ 已下载",
+    AcceptOutcome.ALREADY: "✅ 已下载",
     AcceptOutcome.BLACKLISTED: "已拉黑",
-    AcceptOutcome.FAILED: "重试",
+    AcceptOutcome.FAILED: "🔄 重试",
 }
 
 
