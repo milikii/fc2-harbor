@@ -247,6 +247,9 @@ tests/                unit + integration + live (opt-in), all offline by default
 | `translation.enabled` | true | Requires `TRANSLATION_BASE_URL` / `_API_KEY` / `_MODEL` |
 | `image_fetch.max_previews` / `min_preview_images` | 9 / 3 | Card preview budget and early-stop threshold |
 | `app.log_file` | `/app/data/logs/app.log` | Rotating log file on the data volume |
+| `subscription.polling_enabled` | true | false = manual bot only, no Nyaa polling task |
+| `subscription.max_push_per_round` | 10 | Cards per round, so a backlog drains gradually |
+| `nyaa.initial_backfill_silent` | true | First-run backfill is recorded but never pushed |
 | `downloaders.transmission.save_path_template` | `/downloads/{category}/{job_id}` | Same contract as the qBittorrent template |
 
 `FC2_LOG_LEVEL` and `FC2_DATABASE_URL` are the only environment overrides
