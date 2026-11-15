@@ -277,3 +277,11 @@
 - 对 §7.2 的补充说明：唯一允许「低优先级覆盖高优先级」的情形就是「高优先级只给了摘要、低优先级给了正文」。标题、封面、官网地址、日期等其它字段仍然严格按优先级，绝不被覆盖。
 - 提前停止：默认 `provider.seek_full_description: false`——一旦核心字段与预览图齐了就停，不为一个大概率不存在的全文多打 8 次请求。设为 `true` 时，只有拿到 `full` 才允许提前停止。
 - 实测结论（见 §34 与交付报告）：**当前配置的九个源里没有任何一个能给 FC2 内容的完整简介**（javdb 详情页需登录、javten/javlibrary/missav 403、avsox 是 JS 空壳、mmtv/freejavbt/madou 不索引 FC2 编号）。因此线上卡片显示的是摘要，属预期行为。
+
+## 36. provider 文本统一解码 HTML 实体（只解一次）
+
+- 问题：站点在 meta/标题里给的是 `&quot;` / `&amp;` / `&#39;`，`clean_text()` 只做空白归一化，原样留在 `description_ja` 里；卡片层 `escape_html()` 又把 `&` 转成 `&amp;`，最终显示 `&amp;quot;`（实测 `FC2-PPV-5008574` 简介末尾 `&amp;quot;&amp;amp;gt;`）。
+- 实现（`app/providers/base.py::clean_text`）：`html.unescape()` **一次**，再折叠空白（`&nbsp;` 解成 U+00A0，`split()` 会当空白折叠掉）。不用循环解码：`&amp;quot;` 一次解码成 `&quot;` 是对的，循环会把用户内容里的字面量 `&amp;amp;` 吃成 `&`。
+- 展示链路因此是「provider 解码一次 → 卡片层按 HTML 再编码一次」，两边各做一次，互不叠加。
+- 影响面：所有 provider 的标题/简介（`meta_content`、`first_text`、`first_attr`、`_result`）都经过 `clean_text`。
+- 原始值仍然保留：`releases.raw_payload_json` 由 `app/sources/nyaa.py` 直接从 RSS/搜索页字段构造，**不经过** `clean_text`，所以 RSS 里的原始 `description`、`guid`、`title` 等排查用字段不受影响；`provider_results.result_json` 存的是解析后的值（没有另存一份未解码副本，也没有任何逻辑依赖未解码文本）。

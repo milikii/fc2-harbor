@@ -396,3 +396,83 @@ def test_fc2_without_any_description_is_empty_not_fabricated() -> None:
     assert result.description_ja is None
     assert result.description_quality is None
     assert result.raw["description_source"] is None
+
+
+# -- HTML entities: decoded exactly once, then re-escaped by the card layer -----
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("&quot;x&quot;", '"x"'),
+        ("a &amp; b", "a & b"),
+        ("&lt;b&gt;粗&lt;/b&gt;", "<b>粗</b>"),
+        ("it&#39;s", "it's"),
+        ("a&nbsp;b", "a b"),
+        ("前&nbsp;&nbsp;後", "前 後"),
+        # One pass only: a double-encoded entity stays single-encoded.
+        ("&amp;quot;", "&quot;"),
+        ("literal &amp;amp;", "literal &amp;"),
+        ("  a \n\t b  ", "a b"),
+    ],
+)
+def test_clean_text_decodes_entities_once(raw: str, expected: str) -> None:
+    from app.providers.base import clean_text
+
+    assert clean_text(raw) == expected
+
+
+def test_provider_description_entities_reach_the_card_decoded() -> None:
+    """The reported bug: ``&amp;quot;`` on the card, twice-escaped."""
+
+    from app.services.cards import CardSource, build_card_messages
+
+    html_page = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品">'
+        '<meta name="description" content="タイトルは&quot;衝撃&quot; &amp; 話題 &#39;No.1&#39;">'
+        "</head><body></body></html>"
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(
+            url="https://adult.contents.fc2.com/article/1234567/", html=html_page, status=200
+        ),
+        make_content(),
+    )
+    assert result is not None
+    assert result.description_ja == "タイトルは\"衝撃\" & 話題 'No.1'"
+
+    messages = build_card_messages(
+        CardSource(
+            content_id="0b6f0d4e-0000-4000-8000-000000000001",
+            canonical_key="fc2_ppv:1234567",
+            display_code="FC2-PPV-1234567",
+            title=result.title_ja,
+            description_ja=result.description_ja,
+            description_zh=None,
+            censorship=Censorship.UNKNOWN,
+            nyaa_url="https://sukebei.nyaa.si/view/1",
+            official_url=None,
+        )
+    )
+    caption = messages.caption
+    assert "&amp;quot;" not in caption
+    assert "&quot;" not in caption
+    assert '"衝撃"' in caption
+    # A real ampersand is escaped once, for parse_mode=HTML.
+    assert "&amp; 話題" in caption
+    assert "&#39;" not in caption
+
+
+def test_title_entities_are_decoded_before_matching() -> None:
+    html_page = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 &quot;衝撃&quot; 作品">'
+        "</head><body></body></html>"
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(
+            url="https://adult.contents.fc2.com/article/1234567/", html=html_page, status=200
+        ),
+        make_content(),
+    )
+    assert result is not None
+    assert result.title_ja == '"衝撃" 作品'

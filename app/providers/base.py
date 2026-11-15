@@ -11,6 +11,7 @@ selectors raises :class:`ProviderError` — it never returns a half-empty succes
 
 from __future__ import annotations
 
+import html
 import re
 import time
 from collections.abc import Iterable
@@ -94,9 +95,20 @@ def code_matches(title: str | None, content: Content) -> bool:
 
 
 def clean_text(value: str | None) -> str | None:
+    """Normalise provider text: decode HTML entities **once**, then fold whitespace.
+
+    Sources hand out ``&quot;`` / ``&amp;`` / ``&#39;`` in meta tags and titles, and
+    the card layer re-escapes everything for ``parse_mode=HTML``. Without this step
+    a single quote became ``&amp;quot;`` on the card.
+
+    Exactly one pass on purpose: a loop would turn a literal ``&amp;amp;`` into
+    ``&`` and eat the user's text. ``&nbsp;`` decodes to U+00A0, which ``split()``
+    treats as whitespace, so it is folded away with the rest.
+    """
+
     if value is None:
         return None
-    text = " ".join(value.split())
+    text = " ".join(html.unescape(value).split())
     return text or None
 
 
