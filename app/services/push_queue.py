@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.enums import NotificationStatus
 from app.db.models import AcceptedEntry, BlacklistEntry, Content, Notification, Release
 
-DEFAULT_PUSH_BATCH = 50
+DEFAULT_PUSH_BATCH = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +44,11 @@ class PushCandidate:
 async def find_pending_push_candidates(
     session: AsyncSession, *, limit: int = DEFAULT_PUSH_BATCH
 ) -> list[PushCandidate]:
-    """Contents discovered but never accepted, blacklisted or notified."""
+    """Contents discovered but never accepted, blacklisted or notified.
+
+    Backfilled contents (first-run lookback) are excluded on purpose; ``limit`` comes
+    from ``subscription.max_push_per_round`` so a backlog drains gradually.
+    """
 
     if limit <= 0:
         return []
@@ -78,6 +82,9 @@ async def find_pending_push_candidates(
         .join(Release, Release.content_id == Content.id)
         .join(ranked, and_(ranked.c.release_id == Release.id, ranked.c.rn == 1))
         .where(
+            # Contents from the first-run backfill are never pushed; a fresh install
+            # would otherwise flood the chat with hundreds of cards.
+            Content.backfilled.is_(False),
             Content.canonical_key.not_in(select(AcceptedEntry.canonical_key)),
             Content.canonical_key.not_in(select(BlacklistEntry.canonical_key)),
             # A pending notification means a card was started but not finished, so

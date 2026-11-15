@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from app.db.enums import ContentType, DownloaderName, DownloadStatus
 from app.db.models import AcceptedEntry, Content, DownloadJob, Release
@@ -34,7 +36,7 @@ async def test_all_spec_tables_exist(db: Database) -> None:
 async def test_migration_head_is_applied(db: Database) -> None:
     async with db.session() as session:
         version = await session.scalar(text("SELECT version_num FROM alembic_version"))
-    assert version == "0001_initial_schema"
+    assert version == "0002_content_backfilled"
 
 
 async def _content(db: Database, key: str = "fc2_ppv:1234567") -> str:
@@ -165,6 +167,47 @@ async def test_wal_mode_is_enabled(db: Database) -> None:
     async with db.session() as session:
         mode = await session.scalar(text("PRAGMA journal_mode"))
     assert str(mode).lower() == "wal"
+
+
+def test_upgrade_flags_existing_contents_as_backfilled(tmp_path: Path) -> None:
+    """A deployed install upgrading to 0002 must not push its whole backlog."""
+
+    import sqlite3
+
+    from alembic import command
+    from alembic.config import Config
+    from app.db.session import PROJECT_ROOT
+
+    database = tmp_path / "upgrade.db"
+    url = f"sqlite+aiosqlite:///{database}"
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", url)
+    config.set_main_option("script_location", str(PROJECT_ROOT / "app" / "db" / "migrations"))
+    command.upgrade(config, "0001_initial_schema")
+
+    connection = sqlite3.connect(database)
+    for index in range(3):
+        connection.execute(
+            "INSERT INTO contents (id, content_type, canonical_key, censorship, "
+            "metadata_status, created_at, updated_at) VALUES (?, 'fc2', ?, 'unknown', "
+            "'pending', '2026-01-01', '2026-01-01')",
+            (f"c{index}", f"fc2_ppv:{index}"),
+        )
+    connection.commit()
+    connection.close()
+
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(database)
+    try:
+        flagged = connection.execute(
+            "SELECT COUNT(*) FROM contents WHERE backfilled = 1"
+        ).fetchone()[0]
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    finally:
+        connection.close()
+    assert flagged == 3
+    assert version == "0002_content_backfilled"
 
 
 async def test_counts_helper(db: Database) -> None:

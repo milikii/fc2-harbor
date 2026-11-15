@@ -69,8 +69,10 @@ class Publisher:
 
     # -- public API ---------------------------------------------------------
 
-    async def publish_once(self, *, limit: int = 5) -> PublishReport:
+    async def publish_once(self, *, limit: int | None = None) -> PublishReport:
         report = PublishReport()
+        if limit is None:
+            limit = self.settings.subscription.max_push_per_round
         async with self.db.session() as session:
             candidates = await find_pending_push_candidates(session, limit=limit)
 

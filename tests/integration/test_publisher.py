@@ -234,6 +234,45 @@ async def test_long_description_goes_out_as_extra_messages(db: Database, tmp_pat
     assert notification.description_message_ids_json
 
 
+async def test_push_batch_is_capped_per_round(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        subscription={"max_push_per_round": 1},
+    )
+    await seed(db, tmp_path)
+    async with db.transaction() as session:
+        extra = Content(
+            content_type=ContentType.FC2,
+            canonical_key="fc2_ppv:7654321",
+            display_code="FC2-PPV-7654321",
+            title_ja="二件目",
+            description_ja="説明。",
+        )
+        session.add(extra)
+        await session.flush()
+        session.add(
+            Release(
+                content_id=extra.id,
+                source="nyaa",
+                source_item_id="item-2",
+                source_url="https://sukebei.nyaa.si/view/2",
+                magnet=f"magnet:?xt=urn:btih:{hex_hash(2002)}",
+                info_hash=hex_hash(2002),
+                published_at=datetime.now(UTC),
+            )
+        )
+
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+    first = await publisher.publish_once()
+
+    assert first.published == 1  # capped by subscription.max_push_per_round
+
+    second = await publisher.publish_once()
+    assert second.published == 1  # the backlog drains on the next round
+
+
 async def test_resume_after_partial_send(db: Database, tmp_path: Path) -> None:
     settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
     content_id = await seed(db, tmp_path)

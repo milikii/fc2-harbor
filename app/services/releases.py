@@ -58,7 +58,11 @@ class ReleaseRegistrar:
         self.gate = gate
 
     async def handle(
-        self, candidate: ReleaseCandidate, *, actor: str = "source"
+        self,
+        candidate: ReleaseCandidate,
+        *,
+        actor: str = "source",
+        backfill: bool = False,
     ) -> RegistrationResult:
         subject = subject_from_candidate(candidate)
         if subject is None:
@@ -69,7 +73,9 @@ class ReleaseRegistrar:
 
         try:
             async with self.db.transaction() as session:
-                return await self._handle_in_transaction(session, subject, candidate, actor)
+                return await self._handle_in_transaction(
+                    session, subject, candidate, actor, backfill=backfill
+                )
         except IntegrityError:
             # A concurrent writer or the unique info-hash index won the race.
             _log.info(
@@ -89,11 +95,15 @@ class ReleaseRegistrar:
         subject: GateSubject,
         candidate: ReleaseCandidate,
         actor: str,
+        *,
+        backfill: bool = False,
     ) -> RegistrationResult:
         decision = await self.gate.evaluate(session, subject)
 
         if decision.reason is GateReason.ALLOWED:
             content = await self.gate.ensure_content(session, subject)
+            if backfill and not content.backfilled:
+                content.backfilled = True
             release = self._new_release(content.id, candidate)
             session.add(release)
             await session.flush()
@@ -104,7 +114,7 @@ class ReleaseRegistrar:
                 canonical_key=subject.canonical_key,
                 release_id=release.id,
                 actor=actor,
-                reason=candidate.source,
+                reason="backfill" if backfill else candidate.source,
             )
             _log.info(
                 "release.recorded",

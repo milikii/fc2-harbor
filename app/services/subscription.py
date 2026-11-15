@@ -75,6 +75,9 @@ class SubscriptionPoller:
 
     async def poll_once(self) -> PollReport:
         cursor_json = await self._load_cursor()
+        # First ever round backfills the lookback window; those contents are
+        # flagged so they never reach the push queue (unless configured otherwise).
+        backfill = cursor_json is None and self.settings.nyaa.initial_backfill_silent
         report = PollReport()
 
         try:
@@ -98,7 +101,9 @@ class SubscriptionPoller:
 
         for candidate in candidates:
             try:
-                result = await self.registrar.handle(candidate, actor="subscription")
+                result = await self.registrar.handle(
+                    candidate, actor="subscription", backfill=backfill
+                )
             except Exception as exc:
                 _log.exception(
                     "subscription.candidate_failed",
@@ -121,6 +126,7 @@ class SubscriptionPoller:
         _log.info(
             "subscription.round",
             source=self.source.name,
+            backfill=backfill,
             fetched=report.fetched,
             recorded=report.recorded,
             candidates=report.candidates,

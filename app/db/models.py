@@ -111,6 +111,9 @@ class Content(Base):
         nullable=False,
         default=MetadataStatus.PENDING,
     )
+    #: Written during the first-run backfill window; never pushed as a card
+    #: (spec 6.2 / 9: a fresh install must not flood the chat).
+    backfilled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -128,7 +131,10 @@ class Content(Base):
         back_populates="content", lazy="raise", cascade="all, delete-orphan", passive_deletes=True
     )
 
-    __table_args__ = (Index("ix_contents_content_type", "content_type"),)
+    __table_args__ = (
+        Index("ix_contents_content_type", "content_type"),
+        Index("ix_contents_backfilled", "backfilled"),
+    )
 
 
 class Release(Base):
