@@ -169,3 +169,50 @@ async def test_limit_is_respected(db: Database) -> None:
     async with db.session() as session:
         assert len(await find_pending_push_candidates(session, limit=2)) == 2
         assert len(await find_pending_push_candidates(session, limit=0)) == 0
+
+
+# -- cover gate interaction ---------------------------------------------------
+
+
+async def set_cover_status(db: Database, canonical_key: str, status: str, retries: int = 0) -> None:
+    from sqlalchemy import select
+
+    async with db.transaction() as session:
+        content = await session.scalar(
+            select(Content).where(Content.canonical_key == canonical_key)
+        )
+        assert content is not None
+        content.cover_status = status
+        content.cover_retry_count = retries
+
+
+async def test_give_up_contents_are_excluded_from_the_queue(db: Database) -> None:
+    """A row that will never get a cover must not occupy a batch slot forever."""
+
+    from app.db.enums import CoverStatus
+
+    await seed_content(db, number="1000001")
+    await seed_content(db, number="1000002")
+    await set_cover_status(db, "fc2_ppv:1000002", CoverStatus.GIVE_UP.value, retries=3)
+
+    async with db.session() as session:
+        candidates = await find_pending_push_candidates(session, limit=10)
+
+    assert [item.canonical_key for item in candidates] == ["fc2_ppv:1000001"]
+
+
+async def test_pending_cover_rows_stay_in_the_queue(db: Database) -> None:
+    """Rows waiting for a cover must stay: the publisher retries them each round."""
+
+    from app.db.enums import CoverStatus
+
+    await seed_content(db, number="1000003")
+    await seed_content(db, number="1000004")
+    await set_cover_status(db, "fc2_ppv:1000003", CoverStatus.PENDING_COVER.value, retries=1)
+    await set_cover_status(db, "fc2_ppv:1000004", CoverStatus.READY.value, retries=0)
+
+    async with db.session() as session:
+        candidates = await find_pending_push_candidates(session, limit=10)
+
+    keys = {item.canonical_key for item in candidates}
+    assert keys == {"fc2_ppv:1000003", "fc2_ppv:1000004"}

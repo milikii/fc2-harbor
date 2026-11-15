@@ -285,6 +285,47 @@ docker compose run --rm app python scripts/recensor.py
 - 幂等：第二次跑 `changed=0`；
 - 报告 `recensor-report.json`：每条变化的编号、旧值、新值、依据字段、命中词，以及前后分布。
 
+## 9d3. 救回「放弃等封面」的内容
+
+`publisher.require_cover` 会把重试 3 轮还没拿到封面的内容标成 `give_up`，从此不推。元数据源变好之后（例如 Nyaa fallback 修好了），可以把它们放回队列：
+
+```bash
+# 先看有多少条能救回来
+docker compose run --rm app python scripts/retry_covers.py --dry-run
+
+# 执行（只重置 cover_status=gave_up 的行，retry_count 归零）
+docker compose run --rm app python scripts/retry_covers.py
+```
+
+- 只动 `contents.cover_status` 和 `cover_retry_count`，不碰 `updated_at` 和其它字段；
+- `--since 7` 只处理最近 7 天创建的内容；`--only fc2_ppv:5007946` 只处理指定编号；
+- 幂等：第二次跑 `reset=0`；
+- 报告 `retry-covers-report.json` 列出被重置的编号。
+
+## 9d4. 用配置加一个新元数据源
+
+`provider.custom` 支持纯配置接入站点，不用改代码：
+
+```yaml
+provider:
+  custom:
+    - name: some_site
+      enabled: true
+      search_url: "https://x.com/search?q={code}"
+      detail_url: "https://x.com/v/{id}"     # 可选
+      proxy: japan
+      warmup_url: "https://x.com/"
+      min_interval_seconds: 10
+      selectors: {card: ".item", title: ".title", link: "a[href]",
+                  cover: "img[data-src]", description: ".desc",
+                  previews: ".gallery img"}
+```
+
+- `{code}` 会替换成 `FC2-PPV-1234567`；`{id}` 取匹配卡片链接的最后一段；
+- 选择器只写 `card` 必填，其余可省（缺了就降级，不会报错）；
+- 页面结构变了（`card` 一个都匹配不到）会报 `structure_changed` 并进 `/providers` 的 structure 计数，不会静默当成「没这个编号」；
+- 走和内置源一样的浏览器请求头、cookie 预热和限速。
+
 ## 9e. 回滚导入
 
 导入的每一行都有标记，按标记删除即可（先删 job，再删被引用的行）：

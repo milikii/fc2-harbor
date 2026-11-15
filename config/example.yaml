@@ -116,6 +116,24 @@ provider:
       min_interval_seconds: 10
       jitter_seconds: 2
     Madou: {host: madou.club, enabled: true, proxy: japan}
+  # Sites added through configuration only — no code change needed. They run after
+  # the fixed nine and go through the same browser headers, cookie warm-up and
+  # pacing. Uncomment and fill in once a site is verified:
+  # custom:
+  #   - name: some_site
+  #     enabled: true
+  #     search_url: "https://x.com/search?q={code}"
+  #     detail_url: "https://x.com/v/{id}"     # optional; omit to parse the search page
+  #     proxy: japan
+  #     warmup_url: "https://x.com/"
+  #     min_interval_seconds: 10
+  #     selectors:
+  #       card: ".item"
+  #       title: ".title"
+  #       link: "a[href]"
+  #       cover: "img[data-src]"
+  #       description: ".desc"                # optional
+  #       previews: ".gallery img"            # optional
 
 proxy_profiles:
   direct: {type: direct}

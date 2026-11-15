@@ -460,9 +460,79 @@ class ProviderSourceConfig(_FrozenModel):
         return host
 
 
+class CustomSelectors(_FrozenModel):
+    """CSS selectors for a config-defined provider (all optional but ``card``)."""
+
+    #: One result card on the search page.
+    card: str = ".item"
+    title: str = ".title"
+    #: Link to the detail page (used for ``official_url`` and the detail fetch).
+    link: str = "a[href]"
+    cover: str | None = None
+    description: str | None = None
+    previews: str | None = None
+
+    @field_validator("card", "title", "link")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("selector must not be blank")
+        return text
+
+
+class CustomProviderConfig(_FrozenModel):
+    """A provider defined entirely in YAML (no code change to add a site)."""
+
+    name: str
+    enabled: bool = True
+    #: ``{code}`` is replaced with ``FC2-PPV-1234567``.
+    search_url: str
+    #: Optional detail page template; ``{id}`` comes from the matched card's link.
+    detail_url: str | None = None
+    proxy: str = "japan"
+    timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    headers: dict[str, str] = Field(default_factory=dict)
+    warmup_url: str | None = None
+    min_interval_seconds: float = Field(default=0.0, ge=0, le=120)
+    jitter_seconds: float = Field(default=0.0, ge=0, le=30)
+    selectors: CustomSelectors = Field(default_factory=CustomSelectors)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"custom provider name must be alphanumeric: {value!r}")
+        if name in CANONICAL_FC2_PROVIDER_ORDER or name == "Nyaa":
+            raise ValueError(f"custom provider name {name!r} collides with a built-in one")
+        return name
+
+    @field_validator("search_url")
+    @classmethod
+    def _check_search_url(cls, value: str) -> str:
+        _validate_http_url(value, "provider.custom.search_url")
+        if "{code}" not in value:
+            raise ValueError("provider.custom.search_url must contain {code}")
+        return value
+
+    @field_validator("detail_url")
+    @classmethod
+    def _check_detail_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        _validate_http_url(value, "provider.custom.detail_url")
+        if "{id}" not in value:
+            raise ValueError("provider.custom.detail_url must contain {id}")
+        return value
+
+
 class ProviderSection(_FrozenModel):
     priorities: dict[str, list[str]]
     sources: dict[str, ProviderSourceConfig]
+    #: Extra sites added through configuration only; they run after the fixed nine
+    #: (spec 7.1 keeps the built-in order intact).
+    custom: list[CustomProviderConfig] = Field(default_factory=list)
     #: Spec 7.1 wants all nine enabled. Strict by default; an operator can
     #: explicitly relax it to switch off one broken source, which is then
     #: logged and audited at startup.
@@ -487,6 +557,14 @@ class ProviderSection(_FrozenModel):
                 "the order must never be rewritten by hit rate (spec 7.1 / 25.4)"
             )
         return value
+
+    @model_validator(mode="after")
+    def _check_custom_names(self) -> ProviderSection:
+        names = [item.name for item in self.custom]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate provider.custom names: {duplicates}")
+        return self
 
     @model_validator(mode="after")
     def _check_sources(self) -> ProviderSection:
@@ -843,6 +921,11 @@ class Settings(_FrozenModel):
         referenced.extend(
             (f"provider.sources.{name}.proxy", source.proxy)
             for name, source in self.provider.sources.items()
+        )
+        referenced.extend(
+            (f"provider.custom.{item.name}.proxy", item.proxy)
+            for item in self.provider.custom
+            if item.enabled
         )
         referenced.extend(
             (f"image_fetch.cdn_routes.{host}", profile)

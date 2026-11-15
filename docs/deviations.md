@@ -396,3 +396,22 @@
   - 另外用 `curl_cffi`（`impersonate="chrome"`，即模拟 Chrome TLS 指纹）试过，同样 403 challenge → **不是 TLS 指纹问题**，是 JS 挑战；
   - avsox.click：200 但只有 1520 字节的 JS 空壳（`_csrf` cookie 有返回），页面内容靠前端渲染。
 - 因此这三家（javten / missav / javlibrary）在当前架构下拿不回来，需要以下之一：无头浏览器（Playwright + Chromium，镜像体积和内存代价大）、FlareSolverr 之类的挑战求解 sidecar，或换站点。**等用户决定**，代码里的头/预热/限速仍然保留（对非 Cloudflare 站点有效，且能降低被风控的概率）。
+
+## 48. 配置驱动的 custom provider
+
+- 背景：加一个元数据源要改代码、发版；运维实测到能用的站点应该改 YAML 就能上。
+- 实现（`app/config.py::CustomProviderConfig` + `app/providers/custom.py`）：
+  - `provider.custom: [{name, enabled, search_url, detail_url?, proxy, headers?, warmup_url?, min_interval_seconds?, jitter_seconds?, selectors{card,title,link,cover?,description?,previews?}}]`；
+  - `search_url` 必须含 `{code}`（替换为 `FC2-PPV-1234567`），`detail_url` 必须含 `{id}`（取匹配卡片链接的最后一段）；
+  - 名字不能与内置九个或 `Nyaa` 冲突，不能重名；`proxy` 参与启动时的 profile 校验；
+  - 直接解析搜索页；配了 `detail_url` 时用 `fetch_extra()` 跟随匹配卡片的链接抓详情页，补齐简介/封面/预览；
+  - 与内置源共用 `provider_headers`、cookie 预热、限速；
+  - `card` 选择器一个都匹配不到 → `ProviderError("structure_changed")`（进 `/providers` 的 structure 计数），不静默返回空；卡片存在但没有编号匹配 → `None`（正常的 miss）。
+  - custom 源在九个内置源之后运行，不改动规格书固定顺序。
+- 顺带把 `BaseProvider` 的 `id`/`host`/`proxy_key`/`referer` 从 `ClassVar` 改成普通类属性，否则配置驱动的实例没法带自己的名字。
+
+## 49. `scripts/retry_covers.py`
+
+- 背景：`publisher.require_cover` 会把重试超限的内容标 `give_up` 并永久跳过；Nyaa fallback 修好后这些内容本可以出卡。
+- 实现：把 `cover_status='give_up'` 重置为 `pending`、`cover_retry_count=0`，只动这两列（`updated_at` 钉住不动，见 §42）。支持 `--dry-run`、`--since DAYS`（按 `created_at` 过滤——`updated_at` 曾被污染过，不适合做时间依据）、`--only CANONICAL_KEY`；幂等（第二次 `reset=0`）；报告 `retry-covers-report.json`。
+- 推送队列的配合：SQL 只排除 `cover_status='give_up'`，`pending` / `pending_cover` 仍留在队列里，这样 publisher 每轮才有机会重试。

@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any
 from urllib.parse import urljoin
 
 from selectolax.lexbor import LexborHTMLParser
@@ -349,12 +349,14 @@ def dedupe_urls(urls: Iterable[str | None]) -> list[str]:
 class BaseProvider:
     """One adapter per site. Subclasses define ``id``, ``host`` and ``parse``."""
 
-    id: ClassVar[str] = ""
-    host: ClassVar[str] = ""
+    #: Plain attributes (not ClassVar) so a config-driven provider can set them per
+    #: instance; the built-in adapters still override them at class level.
+    id: str = ""
+    host: str = ""
     #: Config key under ``provider.sources``.
-    proxy_key: ClassVar[str] = ""
+    proxy_key: str = ""
     #: Extra request headers, usually a referer for hotlink protection.
-    referer: ClassVar[str | None] = None
+    referer: str | None = None
 
     def __init__(
         self,

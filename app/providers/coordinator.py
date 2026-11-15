@@ -34,6 +34,7 @@ from app.network.clients import HttpClient
 from app.network.proxy import ProxyRouter
 from app.providers.avsox import AvsoxProvider
 from app.providers.base import BaseProvider, ProviderError, ProviderPage
+from app.providers.custom import build_custom_providers
 from app.providers.fc2 import Fc2Provider
 from app.providers.fc2_hub import Fc2HubProvider
 from app.providers.freejavbt import FreejavbtProvider
@@ -430,6 +431,10 @@ def build_providers(
                 jitter_seconds=source.jitter_seconds,
             )
         )
+
+    # Config-defined sites run after the fixed nine: they supplement them and never
+    # change the built-in order (spec 7.1).
+    providers.extend(build_custom_providers(settings, client=client, router=router))
 
     fallback = NyaaFallbackProvider(
         client=client,
