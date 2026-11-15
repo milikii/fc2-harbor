@@ -266,6 +266,24 @@ docker compose run --rm app python scripts/import_legacy.py \
 - 幂等：已有同 hash 的 job、或该编号已 accepted 的，跳过并记入冲突清单（例如用户正在下的 `fc2_ppv:4744486` 不会被碰）。
 - 报告写在 `migration-report.json`。
 
+## 9d2. 重算历史内容的「有码/无码」标签
+
+词表扩充后，**已入库的内容不会被自动重判**（enrich 只对新卡跑）。跑一次重算：
+
+```bash
+# 先看计划：分布会从 {未知:200} 变成多少
+docker compose run --rm app python scripts/recensor.py --dry-run
+
+# 确认后执行（默认只改 unknown 的行）
+docker compose run --rm app python scripts/recensor.py
+```
+
+- 数据只用库里已有的 `contents.title_ja` / `description_ja` / `releases.raw_title`，**不发任何 HTTP 请求**；
+- 只改 `contents.censorship`，并把 `censorship_evidence` 合并进该内容已有的 `provider_results.result_json["raw"]`（不覆盖其它键）；不动 assets、`metadata_status`、翻译，也不发卡片；
+- **默认只改 `unknown`**，`--force` 才会覆盖已有标签（防止冲掉人工修正）；
+- 幂等：第二次跑 `changed=0`；
+- 报告 `recensor-report.json`：每条变化的编号、旧值、新值、依据字段、命中词，以及前后分布。
+
 ## 9e. 回滚导入
 
 导入的每一行都有标记，按标记删除即可（先删 job，再删被引用的行）：

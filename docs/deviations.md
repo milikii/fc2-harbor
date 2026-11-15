@@ -317,3 +317,14 @@
   - 命中永久失败：**立即停止重试**、`report.dropped += 1`、`status=failed` 且写入 `delete_error`，日志 `notifications.delete_permanent_failure`；
   - 普通失败仍然重试，3 次后放弃并写入 `delete_error = "gave up after N attempts: <类型>"`。
 - 删除用的 Bot 仍然是发卡片的订阅 Bot（`main.py` 里 `MessageDeleter(bot=subscription_bot)`），没有改动。
+
+## 40. 历史内容标签重算脚本（`scripts/recensor.py`）
+
+- 背景：词表扩充（§38）只影响之后 enrich 的内容，历史 200 多条仍是 `unknown`，等于白改。
+- 实现：一次性脚本，**只用库里已有的文本**（`contents.title_ja`、`description_ja`、`releases.raw_title`）跑 `infer_censorship`，不发 HTTP。
+- 边界（有意收窄）：
+  - 只写 `contents.censorship`，并把 `censorship_evidence` **合并**进已有 `provider_results.result_json["raw"]`（保留其它键）；不动 assets、`metadata_status`、翻译、卡片，也不更新 `updated_at`（那个字段描述的是元数据抓取时间）；
+  - 默认只改 `unknown`；`--force` 才覆盖已有值，避免冲掉人工修正；
+  - 无任何措辞依据的行保持 `unknown`（`no_evidence`），不猜。
+- 幂等：第二次运行 `changed=0`（判定与现值相同的行计入 `unchanged`）。
+- 报告 `recensor-report.json` 含每条变化（编号/旧值/新值/依据字段/命中词）与前后分布。
