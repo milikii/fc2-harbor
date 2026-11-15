@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 
 dependencies = [
     "aiogram>=3.13,<4",
+    "aiohttp-socks>=0.9",
     "httpx[socks]>=0.27,<1",
     "selectolax>=0.3.21",
     "defusedxml>=0.7.1",

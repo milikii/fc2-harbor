@@ -12,8 +12,8 @@ from app.db.session import Database
 from tests.support import create_job, hex_hash
 
 
-def make_client(db: Database, settings: Settings) -> httpx.AsyncClient:
-    app = create_health_app(db=db, settings=settings)
+def make_client(db: Database, settings: Settings, **kwargs: object) -> httpx.AsyncClient:
+    app = create_health_app(db=db, settings=settings, **kwargs)  # type: ignore[arg-type]
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -43,6 +43,26 @@ async def test_readyz_reports_degraded_when_database_is_down(
         response = await client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
+
+
+async def test_status_reports_background_task_health(db: Database, settings: Settings) -> None:
+    """A dead polling task must be visible in /status, not just in the logs."""
+
+    from app.services.supervisor import TaskSupervisor
+
+    supervisor = TaskSupervisor(max_restarts=0)
+
+    async def boom() -> None:
+        raise RuntimeError("telegram unreachable")
+
+    supervisor.spawn("subscription-bot", boom)
+    await supervisor.tasks["subscription-bot"]
+
+    async with make_client(db, settings, supervisor=supervisor) as client:
+        response = await client.get("/status")
+
+    payload = response.json()
+    assert payload["tasks"] == {"subscription-bot": "dead"}
 
 
 async def test_status_reports_counts(db: Database, settings: Settings) -> None:

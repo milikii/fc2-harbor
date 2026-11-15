@@ -22,7 +22,11 @@ _log = get_logger("api.health")
 
 
 def create_health_app(
-    *, db: Database, settings: Settings, metrics: object | None = None
+    *,
+    db: Database,
+    settings: Settings,
+    metrics: object | None = None,
+    supervisor: object | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="fc2-harbor",
@@ -68,6 +72,7 @@ def create_health_app(
 
         jobs = {status_value.value: int(count) for status_value, count in job_rows}
         snapshot = metrics.snapshot() if metrics is not None else {}  # type: ignore[attr-defined]
+        tasks = supervisor.snapshot() if supervisor is not None else {}  # type: ignore[attr-defined]
         return {
             "status": "ok",
             "downloaders": sorted(settings.downloaders.enabled_names()),
@@ -76,6 +81,7 @@ def create_health_app(
             "blacklisted": int(blacklisted),
             "failed_jobs": int(failed),
             "jobs": jobs,
+            "tasks": tasks,
             "metrics": snapshot,
         }
 

@@ -23,6 +23,7 @@ from aiogram import Bot, Dispatcher
 
 from app.api.health import create_health_app
 from app.bots.commands import build_commands_router
+from app.bots.factory import build_bot, verify_bot
 from app.bots.manual import PendingSubmissionStore, build_manual_router
 from app.bots.subscription import build_subscription_router
 from app.bots.wiring import polling_summary, wire_dispatchers
@@ -51,6 +52,7 @@ from app.services.releases import ReleaseRegistrar
 from app.services.runtime import RuntimeState
 from app.services.state import record_event
 from app.services.subscription import SubscriptionPoller
+from app.services.supervisor import TaskSupervisor
 from app.services.telegram_assets import TelegramAssetUploader
 from app.sources.nyaa import NyaaSource
 
@@ -104,7 +106,10 @@ async def run(settings: Settings) -> None:
         gate = ContentGate()
         submitter = JobSubmitter(db=db, registry=registry, settings=settings)
 
-        bot = Bot(token=settings.telegram.manual_bot_token.get_secret_value())
+        bot = build_bot(
+            settings.telegram.manual_bot_token.get_secret_value(), settings, name="manual-bot"
+        )
+        await verify_bot(bot, name="manual-bot")
         notifier = TelegramAdminNotifier(bot, settings.telegram.allowed_user_ids)
         monitor = DownloadMonitor(
             db=db,
@@ -158,7 +163,7 @@ async def run(settings: Settings) -> None:
             rule=Fc2CodeRule(settings.fc2.code_min_digits, settings.fc2.code_max_digits),
         )
 
-        tasks_extra: list[asyncio.Task[None]] = []
+        supervisor = TaskSupervisor()
         actions = SubscriptionActions(db=db, gate=gate, submitter=submitter, settings=settings)
         deleter: MessageDeleter | None = None
         publisher: Publisher | None = None
@@ -167,9 +172,12 @@ async def run(settings: Settings) -> None:
         # subscription Bot gets its own dispatcher and its own polling task.
         subscription_router = None
         if settings.telegram.subscription_bot_token is not None:
-            subscription_bot = Bot(
-                token=settings.telegram.subscription_bot_token.get_secret_value()
+            subscription_bot = build_bot(
+                settings.telegram.subscription_bot_token.get_secret_value(),
+                settings,
+                name="subscription-bot",
             )
+            await verify_bot(subscription_bot, name="subscription-bot")
             uploader = TelegramAssetUploader(db=db, bot_name="subscription")
             publisher = Publisher(
                 db=db,
@@ -187,13 +195,6 @@ async def run(settings: Settings) -> None:
                 settings=settings,
                 allowed_user_ids=settings.telegram.allowed_user_ids,
             )
-            tasks_extra.append(
-                asyncio.create_task(
-                    run_publisher_loop(publisher, interval_seconds=60, stop_event=stop_event),
-                    name="publisher",
-                )
-            )
-            tasks_extra.append(asyncio.create_task(deleter.run(stop_event), name="message-deleter"))
 
         ingest = ManualIngestService(db=db, gate=gate, submitter=submitter, settings=settings)
         store = PendingSubmissionStore()
@@ -216,7 +217,9 @@ async def run(settings: Settings) -> None:
             subscription_router=subscription_router,
         )
 
-        health_app = create_health_app(db=db, settings=settings, metrics=metrics)
+        health_app = create_health_app(
+            db=db, settings=settings, metrics=metrics, supervisor=supervisor
+        )
         server = uvicorn.Server(
             uvicorn.Config(
                 health_app,
@@ -230,25 +233,23 @@ async def run(settings: Settings) -> None:
 
         _install_signal_handlers(stop_event)
 
-        tasks = [
-            asyncio.create_task(server.serve(), name="health-server"),
-            asyncio.create_task(
-                dispatcher.start_polling(
-                    bot, allowed_updates=dispatcher.resolve_used_update_types()
-                ),
-                name="manual-bot",
+        supervisor.spawn("health-server", lambda: server.serve())
+        supervisor.spawn(
+            "manual-bot",
+            lambda: dispatcher.start_polling(
+                bot, allowed_updates=dispatcher.resolve_used_update_types()
             ),
-            asyncio.create_task(
-                run_monitor_loop(
-                    monitor,
-                    interval_seconds=settings.downloaders.qbittorrent.poll_interval_seconds,
-                    stop_event=stop_event,
-                ),
-                name="monitor",
+        )
+        supervisor.spawn(
+            "monitor",
+            lambda: run_monitor_loop(
+                monitor,
+                interval_seconds=settings.downloaders.qbittorrent.poll_interval_seconds,
+                stop_event=stop_event,
             ),
-        ]
+        )
         if settings.subscription.polling_enabled:
-            tasks.append(asyncio.create_task(poller.run(stop_event), name="subscription-poll"))
+            supervisor.spawn("subscription-poll", lambda: poller.run(stop_event))
         else:
             _log.warning(
                 "app.subscription_polling_disabled",
@@ -256,18 +257,25 @@ async def run(settings: Settings) -> None:
             )
         if subscription_dispatcher is not None and subscription_bot is not None:
             # The Bot that sent the card must be the Bot that receives its callbacks.
-            tasks.append(
-                asyncio.create_task(
-                    subscription_dispatcher.start_polling(
-                        subscription_bot, allowed_updates=["callback_query"]
-                    ),
-                    name="subscription-bot",
-                )
+            active_dispatcher = subscription_dispatcher
+            active_bot = subscription_bot
+            supervisor.spawn(
+                "subscription-bot",
+                lambda: active_dispatcher.start_polling(
+                    active_bot, allowed_updates=["callback_query"]
+                ),
             )
-        tasks.extend(tasks_extra)
+        if publisher is not None:
+            supervisor.spawn(
+                "publisher",
+                lambda: run_publisher_loop(publisher, interval_seconds=60, stop_event=stop_event),
+            )
+        if deleter is not None:
+            supervisor.spawn("message-deleter", lambda: deleter.run(stop_event))
+
         _log.info(
             "app.ready",
-            tasks=[task.get_name() for task in tasks],
+            tasks=list(supervisor.records),
             **polling_summary(settings),
             subscription_polling=settings.subscription.polling_enabled,
             max_push_per_round=settings.subscription.max_push_per_round,
@@ -283,11 +291,7 @@ async def run(settings: Settings) -> None:
             if running_dispatcher is not None:
                 with contextlib.suppress(RuntimeError):
                     await running_dispatcher.stop_polling()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await supervisor.stop()
     finally:
         if subscription_bot is not None:
             with contextlib.suppress(Exception):
