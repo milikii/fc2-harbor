@@ -13,6 +13,7 @@ from app.services.gate import ContentGate
 from app.services.jobs import JobSubmitter
 from app.services.manual_ingest import ManualIngestService
 from sqlalchemy import func, select
+from structlog.testing import capture_logs
 
 from tests.support import FakeDownloader, hex_hash
 
@@ -213,3 +214,59 @@ async def test_save_path_is_per_job(
     assert len(paths) == 2
     for path in paths:
         assert Path(path).is_absolute()
+
+
+async def test_non_magnet_text_is_logged_with_a_redacted_preview() -> None:
+    """Nothing may be silent: the fallback handler always leaves a log line."""
+
+    from app.bots.manual import reject_non_magnet
+
+    answers: list[str] = []
+
+    class FakeUser:
+        id = 111
+
+    class FakeChat:
+        id = 111
+
+    class FakeMessage:
+        from_user = FakeUser()
+        chat = FakeChat()
+
+        async def answer(self, text: str) -> None:
+            answers.append(text)
+
+    with capture_logs() as logs:
+        await reject_non_magnet(FakeMessage(), "随便说点什么 " + "x" * 300)
+
+    assert answers == []  # no near-miss hint for plain chatter
+    record = next(entry for entry in logs if entry["event"] == "bot.manual.no_magnet")
+    assert record["user_id"] == 111
+    assert len(record["preview"]) == 200
+    assert record["hint_like"] is False
+
+
+async def test_non_magnet_text_with_a_hint_gets_an_answer() -> None:
+    from app.bots.manual import reject_non_magnet
+
+    answers: list[str] = []
+
+    class FakeUser:
+        id = 111
+
+    class FakeChat:
+        id = 111
+
+    class FakeMessage:
+        from_user = FakeUser()
+        chat = FakeChat()
+
+        async def answer(self, text: str) -> None:
+            answers.append(text)
+
+    with capture_logs() as logs:
+        await reject_non_magnet(FakeMessage(), "看这个 magnet 但没贴全")
+
+    assert answers and "没有找到 magnet" in answers[0]
+    record = next(entry for entry in logs if entry["event"] == "bot.manual.no_magnet")
+    assert record["hint_like"] is True

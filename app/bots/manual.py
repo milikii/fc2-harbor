@@ -91,6 +91,32 @@ class PendingSubmissionStore:
         return len(self._items)
 
 
+async def reject_non_magnet(message: Message, text: str) -> None:
+    """Handle text without a magnet: always log, answer only on a near miss.
+
+    "I sent something and nothing happened" must be answerable from the logs.
+    """
+
+    lowered = text.lower()
+    _log.info(
+        "bot.manual.no_magnet",
+        user_id=message.from_user.id if message.from_user else 0,
+        chat_id=message.chat.id,
+        preview=_preview(text),
+        hint_like="magnet" in lowered or "fc2" in lowered,
+    )
+    if "magnet" in lowered or "fc2" in lowered:
+        await message.answer("没有找到 magnet 链接。请直接发送完整的 magnet:?xt=... 链接。")
+
+
+def _preview(text: str, limit: int = 200) -> str:
+    """A log-safe excerpt: collapsed whitespace, truncated, secrets redacted."""
+
+    from app.logging import redact_text
+
+    return redact_text(" ".join(text.split()))[:limit]
+
+
 def build_manual_router(
     *,
     ingest: ManualIngestService,
@@ -105,9 +131,7 @@ def build_manual_router(
     async def handle_text(message: Message) -> None:
         text = message.text or ""
         if extract_magnet(text) is None:
-            lowered = text.lower()
-            if "magnet" in lowered or "fc2" in lowered:
-                await message.answer("没有找到 magnet 链接。请直接发送完整的 magnet:?xt=... 链接。")
+            await reject_non_magnet(message, text)
             return
 
         user_id = message.from_user.id if message.from_user else 0

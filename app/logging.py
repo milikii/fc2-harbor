@@ -55,6 +55,12 @@ def _redact_string(value: str) -> str:
     return redacted
 
 
+def redact_text(value: str) -> str:
+    """Public single-string redaction for values that end up in log fields."""
+
+    return _redact_string(value)
+
+
 def _redact_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, SecretStr):
         return REDACTED
