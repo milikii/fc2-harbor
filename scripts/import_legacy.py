@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -908,6 +909,9 @@ async def run(args: argparse.Namespace) -> tuple[ImportCounts, dict[str, Any]]:
 
 
 FINISHED_STATES = {"finished", "done", "complete", "completed", "seeding", "seed"}
+#: Report groups: FC2-coded tasks stay separate from the generic (hash-identified) ones.
+TRANSMISSION_GROUP = "transmission"
+GENERIC_GROUP = "transmission_generic"
 #: Transmission error codes we know how to interpret.
 ERROR_TRACKER_REFUSED = 1  # "info hash is not authorized" - data may still be whole
 ERROR_PIECE_CORRUPT = 3  # needs a force recheck before it can be trusted
@@ -929,6 +933,8 @@ class MigrationAction:
     size_bytes: int | None
     action: str  # organize | takeover | skip
     reason: str | None = None
+    #: ``transmission`` (FC2 code found) or ``transmission_generic`` (hash only).
+    group: str = TRANSMISSION_GROUP
 
 
 @dataclass(slots=True)
@@ -948,6 +954,21 @@ class MigrationReport:
     def bytes_total(self) -> int:
         return sum(action.size_bytes or 0 for action in self.actions if action.action != "skip")
 
+    def by_group(self) -> dict[str, dict[str, int]]:
+        """Per-group totals so generic tasks never hide inside the FC2 numbers."""
+
+        grouped: dict[str, dict[str, int]] = {}
+        for action in self.actions:
+            bucket = grouped.setdefault(
+                action.group, {"planned": 0, "skipped": 0, "bytes": 0}
+            )
+            if action.action == "skip":
+                bucket["skipped"] += 1
+            else:
+                bucket["planned"] += 1
+                bucket["bytes"] += action.size_bytes or 0
+        return grouped
+
     def by_category(self, settings: Settings) -> dict[str, CategoryBucket]:
         grouped: dict[str, CategoryBucket] = {}
         for action in self.actions:
@@ -962,7 +983,12 @@ class MigrationReport:
         return grouped
 
     def add_skip(
-        self, task: TransmissionTask, normalized: NormalizedContent | None, reason: str
+        self,
+        task: TransmissionTask,
+        normalized: NormalizedContent | None,
+        reason: str,
+        *,
+        group: str = TRANSMISSION_GROUP,
     ) -> None:
         number = (
             normalized.display_code
@@ -980,6 +1006,7 @@ class MigrationReport:
                 size_bytes=task.size_bytes,
                 action="skip",
                 reason=reason,
+                group=group,
             )
         )
 
@@ -994,6 +1021,7 @@ class MigrationReport:
                 "conflicts": len(self.conflicts),
                 "bytes_total": self.bytes_total(),
             },
+            "by_group": self.by_group(),
             "by_category": {
                 name: asdict(bucket) for name, bucket in self.by_category(settings).items()
             },
@@ -1046,7 +1074,89 @@ def load_hashes(path: Path) -> set[str]:
     return hashes
 
 
+#: Torrent-name noise that says nothing about the content itself.
+NAME_NOISE_KEYWORDS = (
+    "1080p",
+    "720p",
+    "2160p",
+    "480p",
+    "4k",
+    "fhd",
+    "uhd",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "aac",
+    "hdr",
+    "60fps",
+    "hd",
+)
+_BRACKET_RE = re.compile(r"[(\[【（]([^)\]】）]{0,80})[)\]】）]")
+_EXTENSION_RE = re.compile(r"\.(mp4|mkv|avi|wmv|ts|m2ts|iso|rmvb|mov|flv)$", re.IGNORECASE)
+#: Display code for a generic (non-FC2) task; also used for the target directory.
+GENERIC_DISPLAY_CODE_MAX = 120
+
+
+def _bracket_is_noise(inner: str) -> bool:
+    lowered = inner.strip().lower()
+    if not lowered:
+        return True
+    if any(keyword in lowered for keyword in NAME_NOISE_KEYWORDS):
+        return True
+    # Opaque site id such as ``fc4306363.45qi7skt``: one long token mixing letters
+    # and digits. Real titles ("美女遊記") never look like that.
+    return any(
+        len(token) >= 10
+        and any(char.isdigit() for char in token)
+        and any(char.isalpha() for char in token)
+        for token in lowered.split()
+    )
+
+
+def clean_torrent_name(name: object, *, limit: int = GENERIC_DISPLAY_CODE_MAX) -> str:
+    """A readable label for a torrent that has no FC2 code.
+
+    ``(HD1080P)(美女遊記)(fc4306363.45qi7skt)…`` → ``美女遊記…``: resolution tags,
+    opaque ids and file extensions are dropped, meaningful bracketed titles stay.
+    """
+
+    text = str(name or "")
+    text = _BRACKET_RE.sub(
+        lambda match: "" if _bracket_is_noise(match.group(1)) else match.group(0), text
+    )
+    text = _EXTENSION_RE.sub("", text.strip())
+    text = " ".join(text.replace(".", " ").replace("_", " ").split())
+    text = text.strip(" -–—")
+    if not text:
+        return "unknown"
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def generic_identity(task: TransmissionTask) -> NormalizedContent:
+    """Identity for a task without an FC2 code (spec 10.6 / 10.7).
+
+    The info hash is the only stable identifier, so it becomes the canonical key —
+    the ``infohash:`` prefix can never collide with ``fc2_ppv:`` — and the content
+    is typed ``generic`` so it lands in ``_review`` instead of a real category.
+    """
+
+    info_hash = (task.info_hash or "").strip().lower()
+    return NormalizedContent(
+        content_type=ContentType.GENERIC,
+        canonical_key=f"infohash:{info_hash}",
+        display_code=clean_torrent_name(task.name),
+    )
+
+
 def resolve_category(task: TransmissionTask, normalized: NormalizedContent) -> str | None:
+    # A generic (non-FC2) task is by definition unclassified: it goes to review so
+    # nothing is filed into a category by guesswork (spec 10.7).
+    if normalized.content_type is ContentType.GENERIC:
+        return "review"
     if task.category:
         return task.category if task.category in CATEGORIES else None
     if normalized.content_type is ContentType.FC2:
@@ -1081,31 +1191,37 @@ async def migrate_transmission(
         normalized = (
             normalize_number(task.code, rule) if task.code else None
         ) or normalize_from_name(task.name, rule)
-        if normalized is None:
-            report.add_skip(task, None, "missing_code")
-            continue
-        if not task.info_hash:
+        generic = normalized is None
+        if generic:
+            # No FC2 code: fall back to the info hash, which is the only stable id
+            # (spec 10.6). Without a hash the task cannot be identified at all.
+            if not task.info_hash:
+                report.add_skip(task, None, "missing_hash", group=GENERIC_GROUP)
+                continue
+            normalized = generic_identity(task)
+        elif not task.info_hash:
             report.add_skip(task, normalized, "missing_hash")
             continue
+        group = GENERIC_GROUP if generic else TRANSMISSION_GROUP
 
         derived = effective_status(task)
         if derived == "unknown":
-            report.add_skip(task, normalized, "unknown_status")
+            report.add_skip(task, normalized, "unknown_status", group=group)
             continue
         if derived != mode:
-            report.add_skip(task, normalized, "status_mismatch")
+            report.add_skip(task, normalized, "status_mismatch", group=group)
             continue
 
         if mode == "incomplete" and not task.qb_save_path:
-            report.add_skip(task, normalized, "missing_qb_save_path")
+            report.add_skip(task, normalized, "missing_qb_save_path", group=group)
             continue
         if mode == "finished" and not task.download_dir:
-            report.add_skip(task, normalized, "missing_download_dir")
+            report.add_skip(task, normalized, "missing_download_dir", group=group)
             continue
 
         category = resolve_category(task, normalized)
         if category is None:
-            report.add_skip(task, normalized, "unknown_category")
+            report.add_skip(task, normalized, "unknown_category", group=group)
             continue
 
         target_name = normalized.display_code or task.name or normalized.canonical_key
@@ -1116,7 +1232,7 @@ async def migrate_transmission(
                 max_length=settings.storage.dir_name_max_length,
             )
         except Exception:
-            report.add_skip(task, normalized, "invalid_target_name")
+            report.add_skip(task, normalized, "invalid_target_name", group=group)
             continue
 
         existing_job = await session.scalar(
@@ -1126,10 +1242,10 @@ async def migrate_transmission(
             select(AcceptedEntry.id).where(AcceptedEntry.canonical_key == normalized.canonical_key)
         )
         if existing_job is not None:
-            report.add_skip(task, normalized, "job_exists")
+            report.add_skip(task, normalized, "job_exists", group=group)
             continue
         if accepted is not None:
-            report.add_skip(task, normalized, "accepted_exists")
+            report.add_skip(task, normalized, "accepted_exists", group=group)
             continue
 
         content = await session.scalar(
@@ -1137,7 +1253,7 @@ async def migrate_transmission(
         )
         if content is None:
             content = Content(
-                content_type=ContentType.FC2,
+                content_type=normalized.content_type,
                 canonical_key=normalized.canonical_key,
                 display_code=normalized.display_code,
                 title_ja=task.name,
@@ -1165,7 +1281,7 @@ async def migrate_transmission(
             session.add(release)
             await session.flush()
         elif release.content_id != content.id:
-            report.add_skip(task, normalized, "info_hash_owned_by_other_content")
+            report.add_skip(task, normalized, "info_hash_owned_by_other_content", group=group)
             continue
 
         session.add(
@@ -1231,6 +1347,7 @@ async def migrate_transmission(
                 target=str(target),
                 size_bytes=task.size_bytes,
                 action=action,
+                group=group,
             )
         )
 

@@ -252,7 +252,12 @@ docker compose run --rm app python scripts/import_legacy.py \
 
 - `--mode finished`：建 `download_jobs`，`status=DOWNLOADED`、`downloader=transmission`。随后**监控与整理器走真实代码路径**：按分类移动到 `/library/<category>/`、校验大小、成功后才删 tr 任务（`deleteFiles=false`）。需要 `downloaders.transmission.enabled: true`，否则监控取不到任务。
 - `--mode incomplete`：这些已由运维加进 qB，只建行：`status=DOWNLOADING`、`downloader=qbittorrent`、`remote_save_path` 取导出里的 `qb_save_path`（**不猜**）。之后监控接管，下完自动整理。
-- 分类：导出里给了 `category` 就用它；FC2 编号默认 `fc2`，其它默认 `jav`（报告逐条列出，执行前可核对）。
+- 分类：导出里给了 `category` 就用它；FC2 编号默认 `fc2`；**提取不到 FC2 编号的任务一律进 `review`（`_review` 目录）**，绝不猜分类（见下一条）。
+- **没有 FC2 编号的任务**（例如 `(HD1080P)(美女遊記)(fc4306363.45qi7skt)…`）不再被跳过：
+  - `canonical_key = infohash:<sha1>`、`content_type = generic`、`display_code` 用清洗后的种子名（去掉 `(HD1080P)`、`(fc4306363.45qi7skt)` 这类分辨率/站点 id 噪声，去掉扩展名，最长 120 字）；
+  - 分类固定 `review`，`releases.source_item_id` 用 hash，同时写 `accepted_entries`（`origin='legacy:transmission'`），门禁按 info hash 就能拦住重复下载；
+  - 报告里单独归一组 `transmission_generic`（`by_group`），不和 FC2 编号混在一起；
+  - 既没有编号**也没有 hash** 的任务无法标识，跳过并记 `missing_hash`。
 - 导出里的 `error` / `percent_done` 会参与判定：
   - `error=1`（tracker 拒绝该 hash）且 `percent_done=1.0` → 数据完整，按 finished 正常整理；
   - `error=3`（Piece is corrupt）→ 先让运维在 tr 里 force recheck；recheck 后仍 `percent_done=1.0` 才按 finished，掉到 1.0 以下按 incomplete。按 finished 处理时报告会写一条 `error_3_piece_corrupt_verify_recheck` 警告；

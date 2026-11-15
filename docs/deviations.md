@@ -285,3 +285,14 @@
 - 展示链路因此是「provider 解码一次 → 卡片层按 HTML 再编码一次」，两边各做一次，互不叠加。
 - 影响面：所有 provider 的标题/简介（`meta_content`、`first_text`、`first_attr`、`_result`）都经过 `clean_text`。
 - 原始值仍然保留：`releases.raw_payload_json` 由 `app/sources/nyaa.py` 直接从 RSS/搜索页字段构造，**不经过** `clean_text`，所以 RSS 里的原始 `description`、`guid`、`title` 等排查用字段不受影响；`provider_results.result_json` 存的是解析后的值（没有另存一份未解码副本，也没有任何逻辑依赖未解码文本）。
+
+## 37. 非 FC2 的 Transmission 任务用 info hash 标识（规格书 10.6 / 10.7）
+
+- 问题：`--transmission-migrate` 原先对提取不到 FC2 编号的任务记 `missing_code` 跳过，导致 qB 里正在下载的非 FC2 任务**没有 job 行**，下完不会被整理（孤儿）。
+- 实现（`scripts/import_legacy.py`）：
+  - `canonical_key = "infohash:<sha1>"`、`content_type = "generic"`、`display_code = clean_torrent_name(name)`（去掉分辨率/编码/站点 id 括号噪声与扩展名，最长 120 字）；`infohash:` 前缀与 `fc2_ppv:` 天然不撞；
+  - 分类固定 `review`（`_review` 目录），**不看导出里的 `category`**：非 FC2 就是分类不明，不能猜；
+  - `releases.source_item_id` 与 `info_hash` 都用 hash，并写 `accepted_entries`（`origin='legacy:transmission'`），门禁的 info hash 检查因此能挡住重复下载；
+  - 报告新增 `by_group`（`transmission` / `transmission_generic`）与每条 action 的 `group` 字段，两类任务不混在一起统计；
+  - 无 hash 的任务无法标识 → `missing_hash` 跳过（记在 `transmission_generic` 组）。
+- 迁移 0001 的 `content_type` CHECK 已是 `fc2/jav/generic`，无需新增迁移。

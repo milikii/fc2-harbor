@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from app.config import Settings
 from app.db.enums import (
     AcceptedOrigin,
@@ -427,8 +428,13 @@ async def test_finished_migration_creates_organize_jobs(db: Database, tmp_path: 
         )
 
     assert report.created == 1
-    assert report.skipped == 2  # missing code, missing download_dir
-    assert report.conflicts[0]["reason"] == "missing_code"
+    # The code-less task is now identified by its hash, so both skips are about the
+    # missing download_dir (one of them in the generic group).
+    assert report.skipped == 2
+    assert [item["reason"] for item in report.conflicts] == [
+        "missing_download_dir",
+        "missing_download_dir",
+    ]
     action = next(item for item in report.actions if item.action == "organize")
     assert action.category == "fc2"
     assert action.target == str(tmp_path / "library" / "fc2" / "FC2-PPV-5007851")
@@ -621,3 +627,173 @@ async def test_migration_report_groups_by_category(db: Database, tmp_path: Path)
     assert summary["by_category"]["fc2"]["files"] == 1
     assert summary["by_category"]["fc2"]["bytes"] == 1000
     assert summary["by_category"]["fc2"]["target"] == str(tmp_path / "library" / "fc2")
+
+
+# -- generic (non-FC2) tasks: identified by info hash, filed into _review -------
+
+GENERIC_NAME = "(HD1080P)(美女遊記)(fc4306363.45qi7skt) 素人撮影"
+GENERIC_HASH = "9" * 40
+
+
+def generic_task(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "name": GENERIC_NAME,
+        "hash": GENERIC_HASH,
+        "status": "downloading",
+        "qb_save_path": "/downloads/review/job-g",
+        "size_bytes": 2048,
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_generic_task_without_a_code_becomes_an_infohash_content(
+    db: Database, tmp_path: Path
+) -> None:
+    settings = migration_settings(tmp_path)
+    tasks = parse_transmission([generic_task()])
+    report = MigrationReport(mode="incomplete", dry_run=False)
+
+    async with db.transaction() as session:
+        await migrate_transmission(
+            session, tasks=tasks, rule=RULE, settings=settings, mode="incomplete", report=report
+        )
+
+    assert report.created == 1
+    async with db.session() as session:
+        content = await session.scalar(select(Content))
+        job = await session.scalar(select(DownloadJob))
+        accepted = await session.scalar(select(AcceptedEntry))
+        release = await session.scalar(select(Release))
+
+    assert content is not None
+    assert content.canonical_key == f"infohash:{GENERIC_HASH}"
+    assert content.content_type is ContentType.GENERIC
+    assert content.display_code == "(美女遊記) 素人撮影"
+    assert job is not None
+    assert job.category == "review"
+    assert job.status is DownloadStatus.DOWNLOADING
+    assert job.downloader is DownloaderName.QBITTORRENT
+    assert job.remote_save_path == "/downloads/review/job-g"
+    assert accepted is not None
+    assert accepted.canonical_key == f"infohash:{GENERIC_HASH}"
+    assert accepted.origin is AcceptedOrigin.LEGACY_TRANSMISSION
+    assert release is not None
+    assert release.source_item_id == GENERIC_HASH
+    assert release.info_hash == GENERIC_HASH
+
+
+async def test_generic_task_is_reported_in_its_own_group(db: Database, tmp_path: Path) -> None:
+    settings = migration_settings(tmp_path)
+    tasks = parse_transmission(
+        [
+            generic_task(),
+            {
+                "name": "FC2-PPV-5007862 Coded",
+                "hash": "7" * 40,
+                "code": "5007862",
+                "status": "downloading",
+                "qb_save_path": "/downloads/fc2/job-c",
+            },
+        ]
+    )
+    report = MigrationReport(mode="incomplete", dry_run=False)
+
+    async with db.transaction() as session:
+        await migrate_transmission(
+            session, tasks=tasks, rule=RULE, settings=settings, mode="incomplete", report=report
+        )
+
+    groups = report.by_group()
+    assert groups["transmission_generic"]["planned"] == 1
+    assert groups["transmission"]["planned"] == 1
+    generic_action = next(
+        item for item in report.actions if item.group == "transmission_generic"
+    )
+    assert generic_action.category == "review"
+    assert "review" in str(generic_action.target)
+
+
+async def test_generic_task_without_a_hash_is_skipped(db: Database, tmp_path: Path) -> None:
+    settings = migration_settings(tmp_path)
+    tasks = parse_transmission([{"name": "no code and no hash", "status": "downloading"}])
+    report = MigrationReport(mode="incomplete", dry_run=False)
+
+    async with db.transaction() as session:
+        await migrate_transmission(
+            session, tasks=tasks, rule=RULE, settings=settings, mode="incomplete", report=report
+        )
+
+    assert report.created == 0
+    assert report.conflicts[0]["reason"] == "missing_hash"
+    assert report.by_group()["transmission_generic"]["skipped"] == 1
+
+
+async def test_generic_task_with_an_existing_accepted_hash_is_skipped(
+    db: Database, tmp_path: Path
+) -> None:
+    """The gate's info-hash check must already know about this torrent."""
+
+    settings = migration_settings(tmp_path)
+    tasks = parse_transmission([generic_task()])
+
+    async with db.transaction() as session:
+        content = Content(
+            content_type=ContentType.GENERIC,
+            canonical_key=f"infohash:{GENERIC_HASH}",
+            display_code="already there",
+        )
+        session.add(content)
+        await session.flush()
+        session.add(
+            AcceptedEntry(
+                canonical_key=f"infohash:{GENERIC_HASH}",
+                content_id=content.id,
+                origin=AcceptedOrigin.LEGACY_IMPORT,
+            )
+        )
+    report = MigrationReport(mode="incomplete", dry_run=False)
+
+    async with db.transaction() as session:
+        await migrate_transmission(
+            session, tasks=tasks, rule=RULE, settings=settings, mode="incomplete", report=report
+        )
+
+    assert report.created == 0
+    assert report.conflicts[0]["reason"] == "accepted_exists"
+    async with db.session() as session:
+        assert await session.scalar(select(func.count()).select_from(DownloadJob)) == 0
+
+
+async def test_generic_migration_is_idempotent(db: Database, tmp_path: Path) -> None:
+    settings = migration_settings(tmp_path)
+    tasks = parse_transmission([generic_task()])
+
+    for _ in range(2):
+        report = MigrationReport(mode="incomplete", dry_run=False)
+        async with db.transaction() as session:
+            await migrate_transmission(
+                session, tasks=tasks, rule=RULE, settings=settings,
+                mode="incomplete", report=report,
+            )
+
+    async with db.session() as session:
+        assert await session.scalar(select(func.count()).select_from(Content)) == 1
+        assert await session.scalar(select(func.count()).select_from(DownloadJob)) == 1
+        assert await session.scalar(select(func.count()).select_from(AcceptedEntry)) == 1
+        assert await session.scalar(select(func.count()).select_from(Release)) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (GENERIC_NAME, "(美女遊記) 素人撮影"),
+        ("[4K] Some Title (2024) [x265].mkv", "Some Title (2024)"),
+        ("(HD1080P)Only Tag", "Only Tag"),
+        ("", "unknown"),
+    ],
+)
+def test_clean_torrent_name_strips_noise(raw: str, expected: str) -> None:
+    from scripts.import_legacy import clean_torrent_name
+
+    assert clean_torrent_name(raw) == expected
