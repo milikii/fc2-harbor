@@ -68,6 +68,9 @@ ${EDITOR:-vi} config/config.yaml
 5. **`translation.enabled`**：有翻译端点填 `true` 并配好三个 `TRANSLATION_*` 变量；**不想用翻译就显式改成 `false`**，否则启动会因为缺凭据失败（这是有意的 fail-fast）。
 6. **`provider.sources.*.proxy`**：默认 `japan`。没有日本代理就全改成 `direct`，否则 provider 请求会失败。
 7. **`fc2.code_min_digits` / `code_max_digits`**：FC2 编号位数，默认 5/8，一般不用动。
+8. **`subscription.polling_enabled`**：`false` 时**完全不启动** Nyaa 轮询，只跑手动 Bot（适合先只用手动投递）。
+9. **`subscription.max_push_per_round`**：每轮最多推几张卡片，默认 10。有积压时逐轮消化，不会一次刷屏。
+10. **`nyaa.initial_backfill_silent`**：默认 `true`。首次启动回填 24h 的内容会被标记为「回填」，**不进推送队列**；只有第一轮成功之后新发现的内容才会推送。想连回填一起推就设 `false`（会一次性收到大量卡片）。
 
 ## 5. 目录与权限（最容易踩的坑）
 
@@ -81,6 +84,24 @@ sudo chown -R 1000:1000 /mnt/storage/downloads /mnt/storage/library
 - 如果 qBittorrent 以别的用户运行，把这里的 `1000:1000` 换成 qB 的 uid/gid，并相应修改镜像的 `USER`（或给这两个目录 `chmod g+w` 并加组）。
 - 判据：`docker compose exec app sh -c 'touch /downloads/.probe && rm /downloads/.probe'` 不报错。
 - SQLite 必须放在本地盘（`./data`），**不要放到 NFS/SMB**，WAL 在网络上会出问题。
+
+## 5b. 构建时需要代理时
+
+镜像构建阶段要访问 PyPI（`files.pythonhosted.org`）。如果 NAS 或构建机直连不通，把代理作为**构建参数**传进去，不要写进 `.env`：
+
+```bash
+docker compose build \
+  --build-arg HTTP_PROXY=http://192.168.1.220:7890 \
+  --build-arg HTTPS_PROXY=http://192.168.1.220:7890 \
+  --build-arg NO_PROXY=localhost,127.0.0.1,192.168.0.0/16
+docker compose up -d
+```
+
+或者取消 `compose.yaml` 里 `build.args` 的注释后直接 `docker compose up -d --build`。
+
+- 参数为空时不影响直连构建（Dockerfile 里声明为空字符串）。
+- 这些变量只存在于构建阶段；运行中的容器仍按 `config.yaml` 显式路由（不读环境里的 `HTTP_PROXY`）。
+- 若用私有 PyPI 镜像，同样在这里加 `--build-arg PIP_INDEX_URL=...`（需在 Dockerfile 里补对应 ARG）。
 
 ## 6. 启动
 
@@ -160,6 +181,14 @@ docker compose logs -f app   # 应看到 db.migrate.done 且没有报错
 ```
 
 `data/app.db-wal` / `-shm` 在恢复前先删掉，避免和旧 WAL 混用。
+
+## 9b. 从旧版本升级
+
+`docker compose up -d --build` 时 entrypoint 会自动执行 `alembic upgrade head`。
+
+- 0002 迁移会给 `contents` 加 `backfilled` 列，并**把所有已存在的内容标记为回填**，避免升级后把积压的几百条一次性推给用户。
+- 升级前建议先备份（`./scripts/backup.sh`）；迁移只前进，回退需要手动 `alembic downgrade` 并恢复数据。
+- 升级后看日志 `app.ready` 里的 `subscription_polling`、`max_push_per_round`、`initial_backfill_silent` 三项，确认与配置一致。
 
 ## 10. 首次冒烟
 

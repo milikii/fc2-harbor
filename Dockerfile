@@ -10,6 +10,16 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
+# Build-time proxy support (apt + pip). Declared empty so a direct build is
+# unaffected; pass them with --build-arg when the build host needs a proxy:
+#   docker compose build --build-arg HTTPS_PROXY=http://192.168.1.220:7890
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG NO_PROXY=""
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY}
+
 # curl is needed for the healthcheck; tzdata for the configured timezone.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl tzdata \

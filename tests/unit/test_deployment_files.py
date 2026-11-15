@@ -103,6 +103,20 @@ def test_spec_is_versioned_in_the_repository() -> None:
     assert "## 23. 分阶段开发顺序" in text
 
 
+def test_dockerfile_accepts_build_time_proxy_args() -> None:
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        assert f"ARG {name}=" in text
+        assert "ENV" in text and f"${{{name}}}" in text
+    # Declared before anything that needs the network (apt + pip).
+    assert text.index("ARG HTTP_PROXY") < text.index("apt-get update")
+    assert text.index("ARG HTTP_PROXY") < text.index("pip install")
+
+    deploy = (ROOT / "docs" / "deploy.md").read_text(encoding="utf-8")
+    assert "--build-arg HTTPS_PROXY" in deploy
+
+
 def test_backup_script_is_executable_and_uses_the_sqlite_backup_api() -> None:
     script = ROOT / "scripts" / "backup.sh"
     assert script.exists()

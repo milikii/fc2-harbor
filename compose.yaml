@@ -11,6 +11,12 @@ services:
   app:
     build:
       context: .
+      # Uncomment when the build host needs a proxy to reach PyPI. The values are
+      # only used during the build, never baked into the running container.
+      # args:
+      #   HTTP_PROXY: http://192.168.1.220:7890
+      #   HTTPS_PROXY: http://192.168.1.220:7890
+      #   NO_PROXY: localhost,127.0.0.1,192.168.0.0/16
     image: fc2-harbor:latest
     container_name: bt-automation
     restart: unless-stopped
