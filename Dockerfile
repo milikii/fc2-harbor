@@ -10,18 +10,19 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
-# Build-time proxy support (apt + pip). Declared empty so a direct build is
-# unaffected; pass them with --build-arg when the build host needs a proxy:
+# Build-time proxy support. The values are applied inline to the apt and pip RUN
+# steps only and are never exported into the runtime image: a lingering HTTP_PROXY
+# would make curl honour a proxy while aiohttp (trust_env=False) ignores it, which
+# is exactly the kind of inconsistency that hides real connectivity problems.
 #   docker compose build --build-arg HTTPS_PROXY=http://192.168.1.220:7890
 ARG HTTP_PROXY=""
 ARG HTTPS_PROXY=""
 ARG NO_PROXY=""
-ENV HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
-    NO_PROXY=${NO_PROXY}
 
 # curl is needed for the healthcheck; tzdata for the configured timezone.
-RUN apt-get update \
+RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" \
+    HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" NO_PROXY="$NO_PROXY" \
+    apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 
@@ -34,7 +35,9 @@ WORKDIR /app
 
 # Dependencies first so the layer cache survives application edits.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" NO_PROXY="$NO_PROXY" \
+    http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=app:app alembic.ini ./
 COPY --chown=app:app app ./app

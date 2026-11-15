@@ -108,13 +108,26 @@ def test_dockerfile_accepts_build_time_proxy_args() -> None:
 
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
         assert f"ARG {name}=" in text
-        assert "ENV" in text and f"${{{name}}}" in text
-    # Declared before anything that needs the network (apt + pip).
+        # Applied inline to the apt/pip steps, never exported for the runtime.
+        assert f'{name}="$' in text
     assert text.index("ARG HTTP_PROXY") < text.index("apt-get update")
     assert text.index("ARG HTTP_PROXY") < text.index("pip install")
 
     deploy = (ROOT / "docs" / "deploy.md").read_text(encoding="utf-8")
     assert "--build-arg HTTPS_PROXY" in deploy
+
+
+def test_dockerfile_does_not_leak_build_proxy_into_runtime() -> None:
+    """A runtime HTTP_PROXY makes curl proxy-aware while aiohttp ignores it."""
+
+    lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    runtime_env = [
+        line
+        for line in lines
+        if line.strip().upper().startswith("ENV")
+        and any(name in line.upper() for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"))
+    ]
+    assert runtime_env == [], f"proxy must not be exported to the runtime: {runtime_env}"
 
 
 def test_backup_script_is_executable_and_uses_the_sqlite_backup_api() -> None:
