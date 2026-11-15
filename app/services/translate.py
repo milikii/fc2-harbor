@@ -32,6 +32,29 @@ class TranslationError(RuntimeError):
         self.code = code
 
 
+def _content_text(content: object) -> str:
+    """Normalise ``message.content``.
+
+    Older endpoints return a plain string; newer OpenAI-compatible ones may return a
+    list of parts (``[{"type": "text", "text": "..."}]``). Both are accepted instead
+    of assuming one version's shape.
+    """
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
 class OpenAITranslator:
     def __init__(
         self,
@@ -104,7 +127,7 @@ class OpenAITranslator:
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise TranslationError("bad_response", "translation response is not usable") from exc
 
-        translated = (content or "").strip()
+        translated = _content_text(content).strip()
         if not translated:
             raise TranslationError("empty", "translation returned no text")
         _log.info("translate.done", latency_ms=latency_ms, chars=len(translated))

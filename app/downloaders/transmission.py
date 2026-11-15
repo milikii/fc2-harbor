@@ -110,17 +110,24 @@ class TransmissionClient:
         headers = {"X-Transmission-Session-Id": self._session_id} if self._session_id else {}
         started = time.monotonic()
         try:
-            response = await self.client.post(self._endpoint, json=payload, headers=headers)
-            if response.status_code == 409:
-                # Session handshake: the server hands out the id it expects.
+            # Session handshake: the server answers 409 with the id it expects, and
+            # the id can rotate (e.g. after a restart), so allow several round trips.
+            for _attempt in range(3):
+                response = await self.client.post(self._endpoint, json=payload, headers=headers)
+                if response.status_code != 409:
+                    break
                 session_id = response.headers.get("X-Transmission-Session-Id")
                 if not session_id:
-                    raise DownloaderProtocolError("Transmission answered 409 without a session id")
+                    raise DownloaderProtocolError(
+                        "Transmission answered 409 without a session id",
+                        code="downloader_handshake_failed",
+                    )
                 self._session_id = session_id
-                response = await self.client.post(
-                    self._endpoint,
-                    json=payload,
-                    headers={"X-Transmission-Session-Id": session_id},
+                headers = {"X-Transmission-Session-Id": session_id}
+            else:
+                raise DownloaderProtocolError(
+                    "Transmission session handshake did not settle after 3 attempts",
+                    code="downloader_handshake_failed",
                 )
         except httpx.HTTPError as exc:
             raise DownloaderUnavailableError(

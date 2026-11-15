@@ -84,6 +84,33 @@ async def test_bad_response_shape_is_typed() -> None:
     assert excinfo.value.code == "bad_response"
 
 
+async def test_list_shaped_content_is_accepted() -> None:
+    """Newer OpenAI-compatible endpoints return content as a list of parts."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "中文"},
+                                {"type": "text", "text": "译文"},
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = translator(handler)
+    try:
+        assert await client.translate("日本語") == "中文译文"
+    finally:
+        await client.aclose()
+
+
 async def test_empty_translation_is_rejected() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]})

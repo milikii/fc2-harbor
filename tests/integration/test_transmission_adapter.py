@@ -12,7 +12,11 @@ import httpx
 import pytest
 import respx
 from app.db.enums import DownloaderName
-from app.downloaders.base import DownloaderAuthError, DownloaderRejectedError
+from app.downloaders.base import (
+    DownloaderAuthError,
+    DownloaderProtocolError,
+    DownloaderRejectedError,
+)
 from app.downloaders.transmission import TransmissionClient
 from app.schemas.download import DownloadHandle, DownloadRequest, evaluate_completion
 
@@ -68,6 +72,41 @@ async def test_session_handshake_then_get(respx_mock: respx.MockRouter) -> None:
     assert snapshot is not None
     assert route.calls[0].request.headers.get("X-Transmission-Session-Id") is None
     assert route.calls[1].request.headers["X-Transmission-Session-Id"] == "sess-1"
+
+
+@respx.mock(assert_all_called=False)
+async def test_session_id_can_rotate_more_than_once(respx_mock: respx.MockRouter) -> None:
+    route = respx_mock.post(RPC).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "sess-1"}),
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "sess-2"}),
+            rpc_response({"torrents": [TORRENT]}),
+        ]
+    )
+    adapter = client()
+    try:
+        snapshot = await adapter.get(
+            DownloadHandle(downloader=DownloaderName.TRANSMISSION, info_hash=HASH)
+        )
+    finally:
+        await adapter.aclose()
+
+    assert snapshot is not None
+    assert route.calls[-1].request.headers["X-Transmission-Session-Id"] == "sess-2"
+
+
+@respx.mock(assert_all_called=False)
+async def test_handshake_without_session_id_fails_clearly(
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.post(RPC).respond(409)
+    adapter = client()
+    try:
+        with pytest.raises(DownloaderProtocolError) as excinfo:
+            await adapter.list_active()
+    finally:
+        await adapter.aclose()
+    assert excinfo.value.code == "downloader_handshake_failed"
 
 
 @respx.mock(assert_all_called=False)

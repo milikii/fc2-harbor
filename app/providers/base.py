@@ -230,7 +230,7 @@ class BaseProvider:
                 error_code=code,
             )
             raise ProviderError(code, f"{self.id}: {exc}", http_status=exc.status) from exc
-        if response.status != 200:
+        if not 200 <= response.status < 300:
             raise ProviderError(
                 "http_error", f"{self.id}: status {response.status}", http_status=response.status
             )

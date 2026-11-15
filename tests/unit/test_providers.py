@@ -285,6 +285,27 @@ def test_code_matches_accepts_all_documented_formats() -> None:
         assert not code_matches(title, content), title
 
 
+async def test_non_200_success_status_is_accepted() -> None:
+    """A 2xx other than 200 is still a successful fetch."""
+
+    body = (FIXTURES / "madou.html").read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(203, content=body, headers={"content-type": "text/html"})
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = MadouProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert result is not None
+    assert result.title_ja
+
+
 async def test_http_404_is_a_miss() -> None:
     """A search-by-code page answers 404 when the site has no such entry."""
 
