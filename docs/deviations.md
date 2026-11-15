@@ -352,3 +352,33 @@
 - 背景：连续两次因为测试 fixture 里写死 `2026-11-14` 这类绝对日期，越过 24h 回填窗口后测试开始随机失败（`rss_fc2.xml` 的 `pubDate`、`rss_with_items()` 生成器）。
 - 实现：`tests/unit/test_no_hardcoded_dates.py` 扫描 `tests/` 下所有 `.py/.xml/.html/.json/.txt/.yaml/.md`，凡出现 `YYYY-MM-DD` 或 `datetime(YYYY,` 且年份 ≥ 2026 一律失败，要求改成 `datetime.now(UTC) - timedelta(...)` 或明确的历史年份。
 - 配套改动：nyaa / provider fixtures 的日期统一改成 2020（时间戳字段同步），解析类断言跟着改；守卫测试自己用常量拼字符串，避免自命中。
+
+## 44. 有码/无码：括号内前缀匹配（`【無・…】`）
+
+- 问题：词表只认完整的 `【無】`，而 FC2 标题里更常见的是 `【無・ごっくん＆中出し】` 这种「括号内以 `無` 开头、后面还有内容」的写法，实测被判成 `unknown`。
+- 实现（`app/providers/base.py`）：先用 `[【\[]([^】\]]{0,40})[】\]]` 取出括号内文字，再看是否以 `無/无`、`有`、`薄` 开头；命中即判对应标签。
+- 防误判（宁可漏判也不错判）：`無` 后面跟 `料/制限/断/償/垢/名/敵/条件/許可/料金/添加/香料` 时不判（`【無料】`、`【無制限】`、`【無断】` 之类与审查无关）；`有` 后面跟 `料/料金/名/限/効/益/用/罪/機/志` 时不判（`【有料】`）。
+- 裸词规则（`無修正` / `有修正` / `モザイク` / `uncensored` / `censored` 等）保持不变；证据按 `(field, token)` 去重。
+
+## 45. 没有封面不推卡片（`publisher.require_cover`）
+
+- 背景：官网查不到的编号会推出「无封面、无简介」的降级卡，用户明确不满意。
+- 实现：
+  - 新配置 `publisher.require_cover`（默认 **true**）与 `publisher.cover_retry_limit`（默认 3）；
+  - publisher 每轮先 enrich，取不到 `assets.role=cover` 就**不发送**，返回 `deferred`；`contents.cover_status` 记 `pending_cover`，`cover_retry_count` 累加；
+  - 达到上限 → `cover_status=give_up` 并打 `publisher.cover_give_up`，之后**不再重试**（推送队列用 SQL 排除 `give_up`，避免它每轮占用名额）；
+  - 拿到封面后标 `cover_status=ready`；
+  - `require_cover: false` 时退回旧行为（无封面发纯文字卡）。
+- 迁移 `0005` 增加 `contents.cover_status`（VARCHAR，**不带 CHECK**）与 `cover_retry_count`。不给它加 CHECK 是有意的：SQLite 上补约束要重建 `contents` 表，而 `releases`/`assets`/`notifications`/`download_jobs`/`provider_results`/`accepted_entries`/`blacklist_entries` 都通过外键指向它，重建风险高于收益；取值由 `app.db.enums.CoverStatus` 在代码里约束。
+- 重试语义：内容没有 notification 行就会一直留在推送队列里，所以「重试」不需要额外调度器；`give_up` 是唯一的终止条件。
+
+## 46. Nyaa fallback 救回来：下载链接、标题兜底、描述配图
+
+- 问题：实机报 `metadata.fallback_failed error_detail="nyaa: no torrent title"`。根因不是站点，是我们请求错了 URL：RSS 的 `link` 是 `/download/<id>.torrent`（种子文件，`application/x-bittorrent`），fallback 直接抓它，解析不到任何 HTML 标题。
+- 修法（`app/providers/nyaa_fallback.py`）：
+  - `url_for_release()` 把 `/download/<id>.torrent` 重写成 `/view/<id>`；
+  - 标题兜底链：`#torrent-title` / `h3.panel-title` / `h1` → `og:title`（去掉 ` :: Sukebei` 后缀）→ **`ProviderContext.release_title`**（我们库里的 `releases.raw_title`）。有种子就一定有标题，所以这条兜底让卡片不会因为官网下架而彻底没标题；
+  - 描述取 `#torrent-description`（上传者正文），不再误取第一个 `.panel-body`（那是 `Category/Date/Info hash` 的元数据表）；
+  - 配图：`#torrent-description img` 的 `src` + 正文里裸的图片 URL（`https?://…(jpg|png|webp|gif)`）；**第一张当 cover**、其余当 previews。`og:image` 在 Nyaa 上永远是站点默认头像（`/static/img/avatar/default.png`），不再拿来当封面；
+  - coordinator 调 fallback 时把 `ctx.release_title` 传进 `ProviderPage`。
+- 真实页面验证（代理，`sukebei.nyaa.si/view/4760732`）：标题正常、描述 304 字、cover = `kr-av.com/upload/…jpg`、preview 1 张。

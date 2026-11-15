@@ -44,6 +44,7 @@ from app.db.enums import (
     AssetRole,
     Censorship,
     ContentType,
+    CoverStatus,
     DownloaderName,
     DownloadStatus,
     MetadataStatus,
@@ -114,6 +115,14 @@ class Content(Base):
     #: Written during the first-run backfill window; never pushed as a card
     #: (spec 6.2 / 9: a fresh install must not flood the chat).
     backfilled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Cover gate state (``app.db.enums.CoverStatus``). Plain string on purpose: a
+    #: CHECK constraint here would need a full table rebuild on SQLite, which is
+    #: risky for a table six others reference by foreign key.
+    cover_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=CoverStatus.PENDING.value
+    )
+    #: How many publisher rounds have tried to obtain a cover.
+    cover_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

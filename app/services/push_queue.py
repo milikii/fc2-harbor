@@ -19,7 +19,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import NotificationStatus
+from app.db.enums import CoverStatus, NotificationStatus
 from app.db.models import AcceptedEntry, BlacklistEntry, Content, Notification, Release
 
 DEFAULT_PUSH_BATCH = 10
@@ -85,6 +85,9 @@ async def find_pending_push_candidates(
             # Contents from the first-run backfill are never pushed; a fresh install
             # would otherwise flood the chat with hundreds of cards.
             Content.backfilled.is_(False),
+            # A content whose cover never arrived is not pushed at all; keeping it
+            # out of the query stops it from occupying a batch slot every round.
+            Content.cover_status != CoverStatus.GIVE_UP.value,
             Content.canonical_key.not_in(select(AcceptedEntry.canonical_key)),
             Content.canonical_key.not_in(select(BlacklistEntry.canonical_key)),
             # A pending notification means a card was started but not finished, so

@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from app.bots.keyboards import card_keyboard
 from app.config import Settings
-from app.db.enums import AssetRole, MetadataStatus, NotificationStatus
+from app.db.enums import AssetRole, CoverStatus, MetadataStatus, NotificationStatus
 from app.db.models import Asset, Content, Release
 from app.db.session import Database
 from app.logging import get_logger
@@ -46,6 +46,8 @@ class PublishReport:
     skipped: int = 0
     failed: int = 0
     text_only: int = 0
+    #: Held back because no cover was available (``publisher.require_cover``).
+    deferred: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -68,6 +70,8 @@ class Publisher:
         self.settings = settings
         self.bot_name = bot_name
         self.metrics = metrics
+        self.require_cover = settings.publisher.require_cover
+        self.cover_retry_limit = settings.publisher.cover_retry_limit
 
     # -- public API ---------------------------------------------------------
 
@@ -87,7 +91,10 @@ class Publisher:
                 self._count("cards.failed")
                 _log.exception("publisher.card_failed", content_id=candidate.content_id)
                 continue
-            if outcome == "skipped":
+            if outcome == "deferred":
+                report.deferred += 1
+                self._count("cards.deferred")
+            elif outcome == "skipped":
                 report.skipped += 1
                 self._count("cards.skipped")
             elif outcome == "resumed":
@@ -113,9 +120,15 @@ class Publisher:
         if content is None:
             return "skipped"
 
-        await self._ensure_metadata(content)
+        await self._ensure_metadata(content, need_cover=self.require_cover)
         card = await self._build_card(content, release, candidate)
         cover = await self._cover_asset(content.id)
+        if cover is None and self.require_cover:
+            # No cover: do not send a degraded card. Retry on a later round until
+            # the limit is reached, then stop for good (user-facing quality rule).
+            await self._defer_missing_cover(content.id)
+            return "deferred"
+        await self._mark_cover_ready(content.id, cover)
         previews = await self._preview_assets(content.id)
 
         outcomes: list[str] = []
@@ -278,14 +291,27 @@ class Publisher:
             )
             return content, release
 
-    async def _ensure_metadata(self, content: Content) -> None:
+    async def _ensure_metadata(self, content: Content, *, need_cover: bool = False) -> None:
+        """Enrich once, unless a cover is still missing and one is required.
+
+        With ``publisher.require_cover`` a content that has previews but no cover
+        must be retried, otherwise it would wait for a cover that never comes.
+        """
+
         async with self.db.session() as session:
             assets = await session.scalar(
                 select(Asset.id).where(Asset.content_id == content.id).limit(1)
             )
-        if assets is not None:
+            has_cover = await session.scalar(
+                select(Asset.id)
+                .where(Asset.content_id == content.id, Asset.role == AssetRole.COVER)
+                .limit(1)
+            )
+        if has_cover is not None:
             return
-        if content.metadata_status is MetadataStatus.FAILED:
+        if not need_cover and assets is not None:
+            return
+        if content.metadata_status is MetadataStatus.FAILED and not need_cover:
             return
         try:
             await self.metadata.enrich(content.id)
@@ -323,6 +349,41 @@ class Publisher:
             published_at=published_at,
             timezone=self.settings.app.timezone,
         )
+
+    async def _defer_missing_cover(self, content_id: str) -> None:
+        """Count the attempt and stop retrying once the limit is reached."""
+
+        async with self.db.transaction() as session:
+            content = await session.get(Content, content_id)
+            if content is None:
+                return
+            if content.cover_status == CoverStatus.GIVE_UP.value:
+                return
+            content.cover_retry_count = (content.cover_retry_count or 0) + 1
+            if content.cover_retry_count >= self.cover_retry_limit:
+                content.cover_status = CoverStatus.GIVE_UP.value
+                _log.warning(
+                    "publisher.cover_give_up",
+                    content_id=content_id,
+                    attempts=content.cover_retry_count,
+                    limit=self.cover_retry_limit,
+                )
+            else:
+                content.cover_status = CoverStatus.PENDING_COVER.value
+                _log.info(
+                    "publisher.cover_missing",
+                    content_id=content_id,
+                    attempts=content.cover_retry_count,
+                    limit=self.cover_retry_limit,
+                )
+
+    async def _mark_cover_ready(self, content_id: str, cover: Asset | None) -> None:
+        if cover is None:
+            return
+        async with self.db.transaction() as session:
+            content = await session.get(Content, content_id)
+            if content is not None and content.cover_status != CoverStatus.READY.value:
+                content.cover_status = CoverStatus.READY.value
 
     async def _cover_asset(self, content_id: str) -> Asset | None:
         async with self.db.session() as session:

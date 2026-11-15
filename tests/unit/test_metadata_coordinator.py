@@ -284,7 +284,9 @@ async def test_nyaa_fallback_only_fills_missing_fields(tmp_path: Path) -> None:
 
     assert aggregated_result.title_ja == "FC2-PPV-1234567 from A"  # not overwritten
     assert aggregated_result.description_ja and "作品" in aggregated_result.description_ja
-    assert len(aggregated_result.previews) == 2
+    # The first description image becomes the cover, the second stays a preview.
+    assert aggregated_result.cover is not None
+    assert len(aggregated_result.previews) == 1
     assert aggregated_result.runs[-1].provider == "Nyaa"
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Settings
-from app.db.enums import AssetRole, ContentType, NotificationStatus
+from app.db.enums import AssetRole, ContentType, CoverStatus, NotificationStatus
 from app.db.models import Asset, Content, Notification, Release
 from app.db.session import Database
 from app.network.image_fetcher import ImageFetcher
@@ -162,7 +162,11 @@ def build_publisher(db: Database, settings: Settings, bot: FakeBot, tmp_path: Pa
 
 
 async def test_card_with_cover_and_previews(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -189,7 +193,11 @@ async def test_card_with_cover_and_previews(db: Database, tmp_path: Path) -> Non
 
 
 async def test_second_run_does_not_duplicate(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -204,7 +212,11 @@ async def test_second_run_does_not_duplicate(db: Database, tmp_path: Path) -> No
 
 
 async def test_text_only_card_without_cover(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, cover=False, previews=0)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -218,7 +230,11 @@ async def test_text_only_card_without_cover(db: Database, tmp_path: Path) -> Non
 
 
 async def test_single_preview_is_sent_as_one_photo(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=1)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -235,7 +251,11 @@ async def test_long_content_truncates_the_caption_and_sends_the_full_text(
 ) -> None:
     """Spec 9.1: the caption is compact, but no body text is lost."""
 
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path)
     async with db.transaction() as session:
         content = await session.get(Content, content_id)
@@ -262,7 +282,11 @@ async def test_long_content_truncates_the_caption_and_sends_the_full_text(
 async def test_overflow_falls_back_to_follow_up_messages(db: Database, tmp_path: Path) -> None:
     """Safety net: a pathological link pushes the text out of the caption."""
 
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path)
     long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
     async with db.transaction() as session:
@@ -292,6 +316,7 @@ async def test_push_batch_is_capped_per_round(db: Database, tmp_path: Path) -> N
         tmp_path,
         telegram={"allowed_user_ids": "111"},
         subscription={"max_push_per_round": 1},
+        publisher={"require_cover": False},
     )
     await seed(db, tmp_path)
     async with db.transaction() as session:
@@ -327,7 +352,11 @@ async def test_push_batch_is_capped_per_round(db: Database, tmp_path: Path) -> N
 
 
 async def test_resume_after_partial_send(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path)
     async with db.transaction() as session:
         notification = await notification_store.get_or_create(
@@ -379,7 +408,11 @@ def _assert_card_buttons(markup: object) -> None:
 
 
 async def test_poster_with_cover_carries_the_card_buttons(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -394,7 +427,11 @@ async def test_poster_with_cover_carries_the_card_buttons(db: Database, tmp_path
 async def test_text_only_poster_carries_the_card_buttons(db: Database, tmp_path: Path) -> None:
     """Without a cover the caption goes out as a text message — buttons included."""
 
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0, cover=False)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -409,7 +446,11 @@ async def test_text_only_poster_carries_the_card_buttons(db: Database, tmp_path:
 async def test_follow_up_text_messages_carry_no_keyboard(db: Database, tmp_path: Path) -> None:
     """Only the poster owns the buttons; the description messages stay plain."""
 
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path, previews=0, cover=False)
     long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
     async with db.transaction() as session:
@@ -427,7 +468,11 @@ async def test_follow_up_text_messages_carry_no_keyboard(db: Database, tmp_path:
 
 
 async def test_card_shows_size_and_time_from_the_release(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0, cover=False)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -440,7 +485,11 @@ async def test_card_shows_size_and_time_from_the_release(db: Database, tmp_path:
 
 
 async def test_card_survives_a_release_without_size(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0, cover=False)
     async with db.transaction() as session:
         release = await session.scalar(select(Release).where(Release.info_hash == HASH))
@@ -457,7 +506,11 @@ async def test_card_survives_a_release_without_size(db: Database, tmp_path: Path
 
 
 async def test_card_is_sent_with_html_parse_mode(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -468,7 +521,11 @@ async def test_card_is_sent_with_html_parse_mode(db: Database, tmp_path: Path) -
 
 
 async def test_text_only_card_uses_html_parse_mode(db: Database, tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     await seed(db, tmp_path, previews=0, cover=False)
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -483,7 +540,11 @@ async def test_markup_in_content_is_escaped_before_sending(
 ) -> None:
     """A title with ``<``/``&`` must not break the HTML message."""
 
-    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
     content_id = await seed(db, tmp_path, previews=0, cover=False)
     async with db.transaction() as session:
         content = await session.get(Content, content_id)
@@ -503,3 +564,106 @@ async def test_markup_in_content_is_escaped_before_sending(
     assert "&lt;u&gt;下划线&lt;/u&gt;" in caption
     # Only the code line keeps real markup.
     assert caption.count("<b>") == 1
+
+
+# -- cover gate: no cover means no card (publisher.require_cover) -------------
+
+
+async def test_card_without_cover_is_not_pushed(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    content_id = await seed(db, tmp_path, cover=False, previews=1)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    report = await publisher.publish_once()
+
+    assert report.deferred == 1
+    assert report.published == 0
+    assert bot.photos == [] and bot.messages == [] and bot.groups == []
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.cover_status == CoverStatus.PENDING_COVER.value
+    assert content.cover_retry_count == 1
+
+
+async def test_cover_retry_counts_up_and_gives_up(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"cover_retry_limit": 2},
+    )
+    content_id = await seed(db, tmp_path, cover=False, previews=1)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+    await publisher.publish_once()
+
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.cover_retry_count == 2
+    assert content.cover_status == CoverStatus.GIVE_UP.value
+    assert bot.photos == []
+
+    # A give-up row leaves the queue: it must not occupy a batch slot forever.
+    from app.services.push_queue import find_pending_push_candidates
+
+    async with db.session() as session:
+        assert await find_pending_push_candidates(session, limit=10) == []
+
+
+async def test_cover_gate_is_logged(db: Database, tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"cover_retry_limit": 1},
+    )
+    await seed(db, tmp_path, cover=False, previews=1)
+    publisher = build_publisher(db, settings, FakeBot(), tmp_path)
+
+    with capture_logs() as logs:
+        await publisher.publish_once()
+
+    events = [entry["event"] for entry in logs]
+    assert "publisher.cover_give_up" in events
+
+
+async def test_card_with_cover_is_published_and_marked_ready(
+    db: Database, tmp_path: Path
+) -> None:
+    settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
+    content_id = await seed(db, tmp_path, cover=True, previews=0)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    report = await publisher.publish_once()
+
+    assert report.published == 1
+    assert len(bot.photos) == 1
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.cover_status == CoverStatus.READY.value
+
+
+async def test_require_cover_false_keeps_the_text_only_card(
+    db: Database, tmp_path: Path
+) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    await seed(db, tmp_path, cover=False, previews=0)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    report = await publisher.publish_once()
+
+    assert report.published == 1
+    assert report.deferred == 0
+    assert len(bot.messages) == 1

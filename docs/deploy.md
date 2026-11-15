@@ -71,8 +71,9 @@ ${EDITOR:-vi} config/config.yaml
 6. **`provider.sources.*.proxy`**：默认 `japan`。没有日本代理就全改成 `direct`，否则 provider 请求会失败。
 7. **`fc2.code_min_digits` / `code_max_digits`**：FC2 编号位数，默认 5/8，一般不用动。
 8. **`subscription.polling_enabled`**：`false` 时**完全不启动** Nyaa 轮询，只跑手动 Bot（适合先只用手动投递）。
-9. **`subscription.max_push_per_round`**：每轮最多推几张卡片，默认 10。有积压时逐轮消化，不会一次刷屏。
-10. **`nyaa.initial_backfill_silent`**：默认 `true`。首次启动回填 24h 的内容会被标记为「回填」，**不进推送队列**；只有第一轮成功之后新发现的内容才会推送。想连回填一起推就设 `false`（会一次性收到大量卡片）。
+9. **`publisher.require_cover`**：默认 `true`，**没有封面的内容不推卡片**（不降级发纯文字卡）。每轮推送会重试抓元数据，最多 `publisher.cover_retry_limit`（默认 3）轮，超了标 `give_up` 并不再重试。想要「没封面也发文字卡」就设成 `false`。
+10. **`subscription.max_push_per_round`**：每轮最多推几张卡片，默认 10。有积压时逐轮消化，不会一次刷屏。
+11. **`nyaa.initial_backfill_silent`**：默认 `true`。首次启动回填 24h 的内容会被标记为「回填」，**不进推送队列**；只有第一轮成功之后新发现的内容才会推送。想连回填一起推就设 `false`（会一次性收到大量卡片）。
 
 ## 5. 目录与权限（最容易踩的坑）
 
@@ -330,5 +331,6 @@ docker compose run --rm app python scripts/import_legacy.py \
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
 | `structure` 计数上涨 | 站点改版，按 `docs/deviations.md` §19 的流程补 fixture + 改 selector |
+| 某编号一直不推卡片 | 查 `contents.cover_status`：`pending_cover` 表示在等封面（重试中），`give_up` 表示重试 `publisher.cover_retry_limit` 轮后放弃（多半是官网页面已下架或抓不到封面）。把该行 `cover_status` 改回 `pending`、`cover_retry_count=0` 可让它重新入队 |
 | 卡片里没有 `🇨🇳` 译文 | 看 `metadata.translate_failed` 的 `error_code`：`non_json` 说明出口被 Google 拦（返回 HTML「Sorry...」页，换出口）；`network` 是代理不通；`length_mismatch`/`bad_response` 是端点换了格式。卡片本身不受影响 |
 | 卡片发出去但 Telegram 报 `can't parse entities` | 只可能来自我们自己拼的 HTML：检查是不是有人改了 `app/services/cards.py` 却没走 `escape_html()`；测试 `test_markup_in_content_is_escaped_before_sending` 会挡住这种回归 |

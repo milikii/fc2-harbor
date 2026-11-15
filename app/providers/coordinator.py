@@ -286,7 +286,13 @@ class MetadataCoordinator:
             return
         try:
             result = fallback.parse(
-                ProviderPage(url=url, html=page.text, status=page.status), content
+                ProviderPage(
+                    url=url,
+                    html=page.text,
+                    status=page.status,
+                    release_title=ctx.release_title,
+                ),
+                content,
             )
         except ProviderError as exc:
             _log.info(

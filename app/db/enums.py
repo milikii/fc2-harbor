@@ -38,6 +38,19 @@ class MetadataStatus(StrEnum):
     FAILED = "failed"
 
 
+class CoverStatus(StrEnum):
+    """Whether a content may be pushed (``publisher.require_cover``)."""
+
+    #: Never evaluated yet.
+    PENDING = "pending"
+    #: Enrichment ran, no cover asset; the publisher will retry next round.
+    PENDING_COVER = "pending_cover"
+    #: A cover exists, cards may go out.
+    READY = "ready"
+    #: Retry limit reached; no further attempts, no card.
+    GIVE_UP = "give_up"
+
+
 class AssetRole(StrEnum):
     """Spec 12.4 — assets.role."""
 

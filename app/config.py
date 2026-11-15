@@ -621,6 +621,16 @@ class TranslationSection(_FrozenModel):
         return self
 
 
+class PublisherSection(_FrozenModel):
+    """Card quality rules (spec 9.1; the user asked for cover-only cards)."""
+
+    #: Do not push a card that has no cover image. The publisher retries the
+    #: metadata fetch on later rounds instead of sending a degraded card.
+    require_cover: bool = True
+    #: How many publisher rounds may try to obtain a cover before giving up.
+    cover_retry_limit: int = Field(default=3, ge=1, le=50)
+
+
 class DownloadSection(_FrozenModel):
     default_downloader: Literal["qbittorrent", "transmission"] = "qbittorrent"
     routes: dict[str, str] = Field(default_factory=lambda: dict.fromkeys(CATEGORIES, "qbittorrent"))
@@ -796,6 +806,7 @@ class Settings(_FrozenModel):
     fc2: Fc2Section = Field(default_factory=Fc2Section)
     nyaa: NyaaSection = Field(default_factory=NyaaSection)
     subscription: SubscriptionSection = Field(default_factory=SubscriptionSection)
+    publisher: PublisherSection = Field(default_factory=PublisherSection)
     provider: ProviderSection
     proxy_profiles: dict[str, ProxyProfile]
     image_fetch: ImageFetchSection = Field(default_factory=ImageFetchSection)

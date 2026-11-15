@@ -141,6 +141,36 @@ CENSORSHIP_TOKENS: tuple[tuple[str, Censorship], ...] = (
     ("censored", Censorship.CENSORED),
     ("モザイク", Censorship.CENSORED),
 )
+#: ``【無・ごっくん＆中出し】`` is extremely common on FC2: the tag is a *prefix*
+#: inside the bracket, not the whole bracket. Matching only ``【無】`` missed them.
+_BRACKET_RE = re.compile(r"[【\[]([^】\]]{0,40})[】\]]")
+_BRACKET_PREFIXES: tuple[tuple[str, Censorship], ...] = (
+    ("無", Censorship.UNCENSORED),
+    ("无", Censorship.UNCENSORED),
+    ("有", Censorship.CENSORED),
+    ("薄", Censorship.THIN),
+)
+#: ``【無料】`` / ``【無制限】`` / ``【無断】`` are not about censoring. Never guess.
+_BRACKET_EXCLUSIONS: dict[Censorship, tuple[str, ...]] = {
+    Censorship.UNCENSORED: (
+        "料",
+        "制限",
+        "断",
+        "償",
+        "垢",
+        "名",
+        "敵",
+        "条件",
+        "許可",
+        "料金",
+        "添加",
+        "香料",
+        "修正しない",
+    ),
+    Censorship.CENSORED: ("料", "料金", "名", "限", "効", "益", "用", "罪", "機", "志"),
+    Censorship.THIN: (),
+}
+
 #: When one text yields several tags, the more specific one wins.
 _CENSORSHIP_PRECEDENCE = (
     Censorship.UNCENSORED,
@@ -171,6 +201,27 @@ def infer_censorship(
         if not value:
             continue
         normalised = normalise_for_match(value)
+        for bracket_match in _BRACKET_RE.finditer(normalised):
+            inner = bracket_match.group(1).strip()
+            if not inner:
+                continue
+            for prefix, verdict in _BRACKET_PREFIXES:
+                if not inner.startswith(prefix):
+                    continue
+                if inner[1:].startswith(_BRACKET_EXCLUSIONS[verdict]):
+                    break  # 【無料】 and friends: not a censoring tag
+                matches.append(
+                    {
+                        "field": field_name,
+                        "token": f"【{inner}】",
+                        "verdict": verdict.value,
+                        "excerpt": value[
+                            max(0, bracket_match.start() - 12) : bracket_match.end() + 12
+                        ].strip(),
+                    }
+                )
+                verdicts.add(verdict)
+                break
         for token, verdict in CENSORSHIP_TOKENS:
             index = normalised.find(normalise_for_match(token))
             if index < 0:
@@ -186,6 +237,16 @@ def infer_censorship(
             )
             verdicts.add(verdict)
             break
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in matches:
+        key = (str(item["field"]), str(item["token"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    matches = deduped
 
     evidence: dict[str, object] = {"matches": matches, "conflict": False}
     if not verdicts:

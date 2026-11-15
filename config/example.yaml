@@ -130,6 +130,14 @@ translation:
   api_key: "${TRANSLATION_API_KEY}"
   model: "${TRANSLATION_MODEL}"
 
+publisher:
+  # A card without a cover is not pushed: the publisher retries the metadata fetch
+  # on later rounds instead of sending a degraded card.
+  require_cover: true
+  # Rounds allowed to obtain a cover before the content is marked give_up (never
+  # pushed, no further attempts).
+  cover_retry_limit: 3
+
 download:
   default_downloader: qbittorrent
   # Startup reconciliation stops resubmitting a job after this many attempts.

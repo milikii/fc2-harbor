@@ -215,8 +215,10 @@ def test_nyaa_fallback_parses_view_page() -> None:
     assert result is not None
     assert result.title_ja and "FC2-1234567" in result.title_ja
     assert result.description_ja and "作品" in result.description_ja
-    assert len(result.previews) == 2
+    # The first description image becomes the cover; the rest stay previews.
     assert result.cover is not None
+    assert result.cover.url == "https://sukebei.nyaa.si/img/n1.jpg"
+    assert [item.url for item in result.previews] == ["https://sukebei.nyaa.si/img/n2.jpg"]
 
 
 def test_nyaa_fallback_builds_url_from_item_id() -> None:
@@ -581,3 +583,111 @@ def test_censorship_evidence_is_recorded_even_when_it_misses() -> None:
     assert result is not None
     assert result.censorship is None
     assert result.raw["censorship_evidence"] == {"matches": [], "conflict": False}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Prefix inside the bracket, not the whole bracket.
+        ("【無・ごっくん＆中出し】素人", Censorship.UNCENSORED),
+        ("【無】素人", Censorship.UNCENSORED),
+        ("【無修正】素人", Censorship.UNCENSORED),
+        ("【無 素人】", Censorship.UNCENSORED),
+        ("【無-素人】", Censorship.UNCENSORED),
+        ("【有・素人】", Censorship.CENSORED),
+        ("【有】素人", Censorship.CENSORED),
+        ("【薄・素人】", Censorship.THIN),
+        # Not about censoring: never guessed.
+        ("【無料】素人", None),
+        ("【無制限】素人", None),
+        ("【無断】素人", None),
+        ("【有料】素人", None),
+        # A bracketed non-tag must not mask a real tag elsewhere.
+        ("【無料】だが無修正", Censorship.UNCENSORED),
+    ],
+)
+def test_censorship_bracket_prefixes(text: str, expected: Censorship | None) -> None:
+    from app.providers.base import infer_censorship
+
+    verdict, evidence = infer_censorship({"title": text})
+    assert verdict is expected
+    if expected is not None:
+        assert evidence["matches"]
+
+
+# -- Nyaa fallback: the safety net when the official site is gone --------------
+
+
+def test_nyaa_fallback_rewrites_a_torrent_download_url() -> None:
+    """RSS links are ``/download/<id>.torrent``; fetching that returns bencode."""
+
+    fallback = provider(NyaaFallbackProvider)
+    url = fallback.url_for_release(
+        "https://sukebei.nyaa.si/download/4761220.torrent", "4761220"
+    )
+    assert url == "https://sukebei.nyaa.si/view/4761220"
+
+
+def test_nyaa_fallback_uses_the_release_title_when_the_page_has_none() -> None:
+    fallback = provider(NyaaFallbackProvider)
+    html = "<html><head></head><body><p>removed</p></body></html>"
+    result = fallback.parse(
+        ProviderPage(
+            url="https://sukebei.nyaa.si/view/4761220",
+            html=html,
+            status=200,
+            release_title="FC2-PPV-1234567 上传者给的标题",
+        ),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.title_ja == "FC2-PPV-1234567 上传者给的标题"
+    assert result.description_ja is None
+
+
+def test_nyaa_fallback_strips_the_site_suffix_from_og_title() -> None:
+    fallback = provider(NyaaFallbackProvider)
+    html = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 タイトル :: Sukebei">'
+        "</head><body></body></html>"
+    )
+    result = fallback.parse(
+        ProviderPage(url="https://sukebei.nyaa.si/view/4761220", html=html, status=200),
+        make_content(),
+    )
+    assert result is not None
+    assert result.title_ja == "FC2-PPV-1234567 タイトル"
+
+
+def test_nyaa_fallback_extracts_bare_image_urls_from_the_description() -> None:
+    fallback = provider(NyaaFallbackProvider)
+    html = (
+        "<html><body><h3 class='panel-title'>FC2-PPV-1234567 タイトル</h3>"
+        "<div class='panel-body'><p>サンプル https://img.example.com/a.jpg です</p>"
+        "<p>https://img.example.com/b.png</p></div></body></html>"
+    )
+    result = fallback.parse(
+        ProviderPage(url="https://sukebei.nyaa.si/view/4761220", html=html, status=200),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.cover is not None and result.cover.url == "https://img.example.com/a.jpg"
+    assert [item.url for item in result.previews] == ["https://img.example.com/b.png"]
+
+
+def test_nyaa_fallback_ignores_the_default_avatar_as_cover() -> None:
+    fallback = provider(NyaaFallbackProvider)
+    html = (
+        '<html><head><meta property="og:image" content="/static/img/avatar/default.png">'
+        "</head><body><h3 class='panel-title'>FC2-PPV-1234567 タイトル</h3></body></html>"
+    )
+    result = fallback.parse(
+        ProviderPage(url="https://sukebei.nyaa.si/view/4761220", html=html, status=200),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.cover is None
+    assert result.previews == []
