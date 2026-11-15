@@ -25,6 +25,7 @@ from app.api.health import create_health_app
 from app.bots.commands import build_commands_router
 from app.bots.manual import PendingSubmissionStore, build_manual_router
 from app.bots.subscription import build_subscription_router
+from app.bots.wiring import polling_summary, wire_dispatchers
 from app.config import ConfigError, Settings, applied_env_overrides
 from app.db.session import Database, migrate_async
 from app.downloaders.coordinator import DownloaderRegistry
@@ -157,11 +158,14 @@ async def run(settings: Settings) -> None:
             rule=Fc2CodeRule(settings.fc2.code_min_digits, settings.fc2.code_max_digits),
         )
 
-        dispatcher = Dispatcher()
         tasks_extra: list[asyncio.Task[None]] = []
         actions = SubscriptionActions(db=db, gate=gate, submitter=submitter, settings=settings)
         deleter: MessageDeleter | None = None
         publisher: Publisher | None = None
+
+        # Card callbacks are delivered only to the Bot that sent the card, so the
+        # subscription Bot gets its own dispatcher and its own polling task.
+        subscription_router = None
         if settings.telegram.subscription_bot_token is not None:
             subscription_bot = Bot(
                 token=settings.telegram.subscription_bot_token.get_secret_value()
@@ -176,14 +180,12 @@ async def run(settings: Settings) -> None:
                 metrics=metrics,
             )
             deleter = MessageDeleter(db=db, bot=subscription_bot)
-            dispatcher.include_router(
-                build_subscription_router(
-                    db=db,
-                    actions=actions,
-                    deleter=deleter,
-                    settings=settings,
-                    allowed_user_ids=settings.telegram.allowed_user_ids,
-                )
+            subscription_router = build_subscription_router(
+                db=db,
+                actions=actions,
+                deleter=deleter,
+                settings=settings,
+                allowed_user_ids=settings.telegram.allowed_user_ids,
             )
             tasks_extra.append(
                 asyncio.create_task(
@@ -195,21 +197,23 @@ async def run(settings: Settings) -> None:
 
         ingest = ManualIngestService(db=db, gate=gate, submitter=submitter, settings=settings)
         store = PendingSubmissionStore()
-        dispatcher.include_router(
-            build_commands_router(
-                db=db,
-                submitter=submitter,
-                allowed_user_ids=settings.telegram.allowed_user_ids,
-                admin=admin,
-                state=runtime,
-            )
+        manual_router = build_commands_router(
+            db=db,
+            submitter=submitter,
+            allowed_user_ids=settings.telegram.allowed_user_ids,
+            admin=admin,
+            state=runtime,
         )
-        dispatcher.include_router(
+        manual_router.include_router(
             build_manual_router(
                 ingest=ingest,
                 store=store,
                 allowed_user_ids=settings.telegram.allowed_user_ids,
             )
+        )
+        dispatcher, subscription_dispatcher = wire_dispatchers(
+            manual_router=manual_router,
+            subscription_router=subscription_router,
         )
 
         health_app = create_health_app(db=db, settings=settings, metrics=metrics)
@@ -244,16 +248,27 @@ async def run(settings: Settings) -> None:
             ),
         ]
         if settings.subscription.polling_enabled:
-            tasks.append(asyncio.create_task(poller.run(stop_event), name="subscription"))
+            tasks.append(asyncio.create_task(poller.run(stop_event), name="subscription-poll"))
         else:
             _log.warning(
                 "app.subscription_polling_disabled",
                 reason="subscription.polling_enabled=false",
             )
+        if subscription_dispatcher is not None and subscription_bot is not None:
+            # The Bot that sent the card must be the Bot that receives its callbacks.
+            tasks.append(
+                asyncio.create_task(
+                    subscription_dispatcher.start_polling(
+                        subscription_bot, allowed_updates=["callback_query"]
+                    ),
+                    name="subscription-bot",
+                )
+            )
         tasks.extend(tasks_extra)
         _log.info(
             "app.ready",
             tasks=[task.get_name() for task in tasks],
+            **polling_summary(settings),
             subscription_polling=settings.subscription.polling_enabled,
             max_push_per_round=settings.subscription.max_push_per_round,
             initial_backfill_silent=settings.nyaa.initial_backfill_silent,
@@ -264,9 +279,10 @@ async def run(settings: Settings) -> None:
 
         if server is not None:
             server.should_exit = True
-        if dispatcher is not None:
-            with contextlib.suppress(RuntimeError):
-                await dispatcher.stop_polling()
+        for running_dispatcher in (dispatcher, subscription_dispatcher):
+            if running_dispatcher is not None:
+                with contextlib.suppress(RuntimeError):
+                    await running_dispatcher.stop_polling()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -334,9 +350,10 @@ def planned_tasks(settings: Settings) -> list[str]:
 
     names = ["health-server", "manual-bot", "monitor"]
     if settings.subscription.polling_enabled:
-        names.append("subscription")
+        names.append("subscription-poll")
     if settings.telegram.subscription_bot_token is not None:
-        names.extend(["publisher", "message-deleter"])
+        # The subscription Bot polls its own dispatcher for card callbacks.
+        names.extend(["subscription-bot", "publisher", "message-deleter"])
     return names
 
 

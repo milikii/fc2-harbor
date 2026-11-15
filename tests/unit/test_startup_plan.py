@@ -19,7 +19,8 @@ def test_default_plan_polls_and_pushes(tmp_path: Path) -> None:
         "health-server",
         "manual-bot",
         "monitor",
-        "subscription",
+        "subscription-poll",
+        "subscription-bot",
         "publisher",
         "message-deleter",
     ]
@@ -33,7 +34,8 @@ def test_polling_disabled_removes_the_subscription_task(tmp_path: Path) -> None:
     )
     tasks = planned_tasks(settings)
 
-    assert "subscription" not in tasks
+    assert "subscription-poll" not in tasks
+    assert "subscription-bot" in tasks  # card callbacks still need polling
     assert "publisher" in tasks  # push still works for already discovered content
     assert "manual-bot" in tasks
 
@@ -44,4 +46,5 @@ def test_no_subscription_token_means_no_publisher(tmp_path: Path) -> None:
     tasks = planned_tasks(settings)
     assert "publisher" not in tasks
     assert "message-deleter" not in tasks
-    assert "subscription" in tasks  # polling still records discoveries
+    assert "subscription-bot" not in tasks
+    assert "subscription-poll" in tasks  # polling still records discoveries
