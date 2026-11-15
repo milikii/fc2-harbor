@@ -17,10 +17,12 @@ Inputs (NAS layout by default, every path overridable):
                                  (origin ``legacy_import``) + a ``releases`` row
                                  when an info hash is known
 ``fc2_claims.jsonl``             dedupe claims → ``accepted_entries``
-``fc2_done.jsonl.pending``       two-phase log (pending + ack). Numbers that are
-                                 not already in ``fc2_done.jsonl`` are imported
-                                 as accepted: better to skip one push than to
-                                 download the same thing twice
+``fc2_done.jsonl.pending``       **never imported.** This is the legacy
+                                 "delete this card" queue (``DoneDeletionQueue``:
+                                 the download bot writes it, the FC2 bot deletes
+                                 its own cards and writes an ack), not a download
+                                 record. Importing it would wrongly block content;
+                                 only its line count is reported
 ``--transmission-export X.json``  existing Transmission (tr-bt) tasks. Registered
                                  as accepted + release only — **no download job**,
                                  because those tasks are still seeding elsewhere

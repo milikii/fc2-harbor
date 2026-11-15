@@ -232,6 +232,20 @@ async def test_pending_file_is_only_counted(db: Database, tmp_path: Path) -> Non
     assert pending_content is None
 
 
+def test_importer_docstring_documents_pending_as_never_imported() -> None:
+    """Guard the documented rule: the pending file is a card-deletion queue."""
+
+    from scripts import import_legacy as importer_module
+
+    docstring = importer_module.__doc__ or ""
+    pending_line = next(
+        (line for line in docstring.splitlines() if "fc2_done.jsonl.pending" in line),
+        "",
+    )
+    assert "never imported" in pending_line
+    assert "not already in" not in docstring
+
+
 async def test_import_is_idempotent(db: Database, tmp_path: Path) -> None:
     paths = write_fixtures(tmp_path)
     await run_import(db, paths)
