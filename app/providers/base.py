@@ -11,7 +11,9 @@ selectors raises :class:`ProviderError` — it never returns a half-empty succes
 
 from __future__ import annotations
 
+import asyncio
 import html
+import random
 import re
 import time
 import unicodedata
@@ -25,6 +27,7 @@ from selectolax.lexbor import LexborHTMLParser
 from app.db.enums import Censorship
 from app.db.models import Content
 from app.logging import get_logger
+from app.network.browser_headers import provider_headers
 from app.network.clients import HttpClient, HttpError
 from app.schemas.metadata import AssetCandidate, MetadataResult, ProviderContext
 
@@ -360,11 +363,21 @@ class BaseProvider:
         proxy_url: str | None = None,
         timeout_seconds: float = 15.0,
         proxy_region: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        warmup_url: str | None = None,
+        min_interval_seconds: float = 0.0,
+        jitter_seconds: float = 0.0,
     ) -> None:
         self.client = client
         self.proxy_url = proxy_url
         self.timeout_seconds = timeout_seconds
         self.proxy_region = proxy_region
+        self.headers = dict(headers or {})
+        self.warmup_url = warmup_url
+        self.min_interval_seconds = min_interval_seconds
+        self.jitter_seconds = jitter_seconds
+        self._warmed = False
+        self._last_request = 0.0
 
     # -- URL construction (per provider) ------------------------------------
 
@@ -373,9 +386,54 @@ class BaseProvider:
 
     # -- fetch --------------------------------------------------------------
 
+    async def _throttle(self) -> None:
+        """Stay under a per-site request rate, with a little jitter."""
+
+        if self.min_interval_seconds <= 0 and self.jitter_seconds <= 0:
+            return
+        if self._last_request:
+            wait = (
+                self._last_request
+                + self.min_interval_seconds
+                + random.uniform(0, self.jitter_seconds)  # noqa: S311 - pacing, not crypto
+                - time.monotonic()
+            )
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._last_request = time.monotonic()
+
+    async def _warm_up(self) -> str | None:
+        """Visit the site once so cookies exist and the referer is same-origin.
+
+        Failure is fine: the real request still goes out with browser headers.
+        """
+
+        if self._warmed or not self.warmup_url:
+            return self.referer
+        self._warmed = True
+        try:
+            await self.client.get(
+                self.warmup_url,
+                headers=provider_headers(self.host, overrides=self.headers),
+                proxy_url=self.proxy_url,
+                proxy_label=self.proxy_key or self.id,
+                proxy_region=self.proxy_region,
+            )
+        except HttpError as exc:
+            _log.info(
+                "provider.warmup_failed",
+                provider=self.id,
+                url=self.warmup_url,
+                status=exc.status,
+            )
+            return self.referer
+        return self.warmup_url
+
     async def fetch(self, content: Content, ctx: ProviderContext) -> MetadataResult:
         url = self.build_url(content)
-        headers = {"Referer": self.referer} if self.referer else {}
+        await self._throttle()
+        referer = await self._warm_up() or self.referer
+        headers = provider_headers(self.host, referer=referer, overrides=self.headers)
         started = time.monotonic()
         try:
             response = await self.client.get(

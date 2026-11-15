@@ -382,3 +382,17 @@
   - 配图：`#torrent-description img` 的 `src` + 正文里裸的图片 URL（`https?://…(jpg|png|webp|gif)`）；**第一张当 cover**、其余当 previews。`og:image` 在 Nyaa 上永远是站点默认头像（`/static/img/avatar/default.png`），不再拿来当封面；
   - coordinator 调 fallback 时把 `ctx.release_title` 传进 `ProviderPage`。
 - 真实页面验证（代理，`sukebei.nyaa.si/view/4760732`）：标题正常、描述 304 字、cover = `kr-av.com/upload/…jpg`、preview 1 张。
+
+## 47. provider 请求伪装：浏览器头 + cookie 预热 + 限速
+
+- 背景：旧系统基线 fc2_hub（javten）25.6%、Mmtv 14.0%、miss_av 5.3%，现在这些站点返回 403，怀疑请求被识别成爬虫。
+- 实现：
+  - `app/network/browser_headers.py::provider_headers(host, referer=…)` 统一构造 Chrome 导航头：`User-Agent`（Chrome 131）、`Accept`、`Accept-Language: ja,…`、`Accept-Encoding: gzip, deflate`（不写 `br`，httpx 无额外依赖时解不了）、`Upgrade-Insecure-Requests`、`Cache-Control`、`Sec-Fetch-{Site,Mode,User,Dest}`（`Sec-Fetch-Site` 按 referer 与目标 host 是否同源推导）；
+  - 每个 provider 只写一次（`BaseProvider.fetch`），不在 9 个适配器里重复；
+  - `provider.sources.<name>` 新增 `headers`（覆盖）、`warmup_url`（先访问一次首页：拿 cookie + 让 referer 同源）、`min_interval_seconds` / `jitter_seconds`（每站限速，10s ≈ 6/min）；
+  - cookie 复用同一个 `HttpClient` 的 cookie jar（按代理分池），预热拿到的 `Set-Cookie` 自动带到后续请求。
+- **实测结论（2026-11-15，经日本代理）**：
+  - javten.com、missav123.com、javlibrary.com：**403 + `cf-mitigated: challenge` + `server: cloudflare` + `cf-ray`**，即 Cloudflare 的 JS/managed challenge。补齐浏览器头、cookie 预热、referer 链之后仍然是 challenge；
+  - 另外用 `curl_cffi`（`impersonate="chrome"`，即模拟 Chrome TLS 指纹）试过，同样 403 challenge → **不是 TLS 指纹问题**，是 JS 挑战；
+  - avsox.click：200 但只有 1520 字节的 JS 空壳（`_csrf` cookie 有返回），页面内容靠前端渲染。
+- 因此这三家（javten / missav / javlibrary）在当前架构下拿不回来，需要以下之一：无头浏览器（Playwright + Chromium，镜像体积和内存代价大）、FlareSolverr 之类的挑战求解 sidecar，或换站点。**等用户决定**，代码里的头/预热/限速仍然保留（对非 Cloudflare 站点有效，且能降低被风控的概率）。

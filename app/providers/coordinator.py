@@ -424,6 +424,10 @@ def build_providers(
                 proxy_url=target.url,
                 timeout_seconds=source.timeout_seconds,
                 proxy_region=target.region,
+                headers=source.headers,
+                warmup_url=source.warmup_url,
+                min_interval_seconds=source.min_interval_seconds,
+                jitter_seconds=source.jitter_seconds,
             )
         )
 

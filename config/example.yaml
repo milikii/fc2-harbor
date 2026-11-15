@@ -73,15 +73,48 @@ provider:
   # Fixed order, never reordered by hit rate (spec 7.1). Validated at startup.
   priorities:
     jav_fc2: [Fc2, fc2_hub, Javdb, Mmtv, freejavbt, miss_av, Javlibrary, avsox, Madou]
+  # Every source gets a Chrome-like header set automatically. The optional keys:
+  #   warmup_url            visit this page once first: collects cookies and makes
+  #                         the Referer same-origin (what a browser does)
+  #   min_interval_seconds  minimum gap between requests (10 = 6/min)
+  #   jitter_seconds        random extra delay, avoids a metronome pattern
+  #   headers               per-site header overrides
+  # Sites behind a Cloudflare JS challenge (javten, missav, javlibrary) still answer
+  # 403 `cf-mitigated: challenge`; headers/cookies cannot solve that, it needs a
+  # browser or a challenge-solving proxy.
   sources:
     Fc2: {host: adult.contents.fc2.com, enabled: true, proxy: japan}
-    fc2_hub: {host: javten.com, enabled: true, proxy: japan}
+    fc2_hub:
+      host: javten.com
+      enabled: true
+      proxy: japan
+      warmup_url: "https://javten.com/"
+      min_interval_seconds: 10
+      jitter_seconds: 2
     Javdb: {host: javdb.com, enabled: true, proxy: japan}
     Mmtv: {host: 7mmtv.sx, enabled: true, proxy: japan}
     freejavbt: {host: freejavbt.com, enabled: true, proxy: japan}
-    miss_av: {host: missav123.com, enabled: true, proxy: japan}
-    Javlibrary: {host: javlibrary.com, enabled: true, proxy: japan}
-    avsox: {host: avsox.click, enabled: true, proxy: japan}
+    miss_av:
+      host: missav123.com
+      enabled: true
+      proxy: japan
+      warmup_url: "https://missav123.com/"
+      min_interval_seconds: 10
+      jitter_seconds: 2
+    Javlibrary:
+      host: javlibrary.com
+      enabled: true
+      proxy: japan
+      warmup_url: "https://www.javlibrary.com/en/"
+      min_interval_seconds: 10
+      jitter_seconds: 2
+    avsox:
+      host: avsox.click
+      enabled: true
+      proxy: japan
+      warmup_url: "https://avsox.click/"
+      min_interval_seconds: 10
+      jitter_seconds: 2
     Madou: {host: madou.club, enabled: true, proxy: japan}
 
 proxy_profiles:

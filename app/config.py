@@ -440,6 +440,16 @@ class ProviderSourceConfig(_FrozenModel):
     timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     concurrency: int = Field(default=2, ge=1, le=4)
     retries: int = Field(default=2, ge=0, le=5)
+    #: Extra/override request headers, e.g. a site that wants a different
+    #: ``Accept-Language``. Merged over the browser defaults.
+    headers: dict[str, str] = Field(default_factory=dict)
+    #: Page to visit once before the first real request: collects cookies and gives
+    #: a same-origin ``Referer``, which is what a browser navigation looks like.
+    warmup_url: str | None = None
+    #: Minimum seconds between two requests to this site (6/min = 10s).
+    min_interval_seconds: float = Field(default=0.0, ge=0, le=120)
+    #: Random extra delay on top of the interval, to avoid a metronome pattern.
+    jitter_seconds: float = Field(default=0.0, ge=0, le=30)
 
     @field_validator("host")
     @classmethod
