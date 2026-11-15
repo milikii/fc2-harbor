@@ -37,7 +37,7 @@ from app.db.enums import Censorship
 from app.db.models import Content, ProviderResult, Release
 from app.db.session import Database, migrate_async
 from app.providers.base import infer_censorship
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 #: The provider whose row is authoritative for the official page.
@@ -94,6 +94,13 @@ class RecensorReport:
                 "after": _ordered(self.after),
             },
             "changes": self.changes,
+            "notes": [
+                "updated_at is deliberately left untouched: it means \"when the "
+                "metadata was fetched\", not \"when the tag was recomputed\".",
+                "Runs of this script before the 2026-11-15 fix did bump updated_at "
+                "for every row they changed; for those rows the value is the "
+                "recensor run time, not the metadata fetch time.",
+            ],
         }
 
 
@@ -138,7 +145,15 @@ async def recensor(
             continue
 
         old = content.censorship
-        content.censorship = verdict
+        # A Core UPDATE with ``updated_at`` pinned to itself: the column carries an
+        # ORM ``onupdate`` default, which would otherwise stamp every touched row
+        # and turn ``updated_at`` into "when the tag was recomputed".
+        await session.execute(
+            update(Content)
+            .where(Content.id == content.id)
+            .values(censorship=verdict, updated_at=Content.updated_at)
+            .execution_options(synchronize_session=False)
+        )
         report.changed += 1
         report.after[label(verdict)] += 1
 

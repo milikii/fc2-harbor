@@ -325,6 +325,7 @@
 - 实现：一次性脚本，**只用库里已有的文本**（`contents.title_ja`、`description_ja`、`releases.raw_title`）跑 `infer_censorship`，不发 HTTP。
 - 边界（有意收窄）：
   - 只写 `contents.censorship`，并把 `censorship_evidence` **合并**进已有 `provider_results.result_json["raw"]`（保留其它键）；不动 assets、`metadata_status`、翻译、卡片，也不更新 `updated_at`（那个字段描述的是元数据抓取时间）；
+  - `updated_at` 带 ORM `onupdate`，普通 ORM 赋值会顺带改掉它，所以更新走 Core `update(Content).values(..., updated_at=Content.updated_at)`（把值钉成自身，`onupdate` 不触发）并 `synchronize_session=False`。**修复前跑过的批次已经把这批行的 `updated_at` 污染成重算时间**，报告里 `notes` 会写明这一点，不回滚；
   - 默认只改 `unknown`；`--force` 才覆盖已有值，避免冲掉人工修正；
   - 无任何措辞依据的行保持 `unknown`（`no_evidence`），不猜。
 - 幂等：第二次运行 `changed=0`（判定与现值相同的行计入 `unchanged`）。

@@ -51,6 +51,9 @@ def search_url(settings: Settings, page: int) -> str:
 
 
 def rss_with_items(count: int, *, start_id: int = 1910000) -> bytes:
+    # Recent pubDates: the first run applies a wall-clock lookback window, so a
+    # hard-coded date would silently drop every item once the fixture aged out.
+    stamp = format_datetime(datetime.now(UTC) - timedelta(hours=1))
     items = []
     for index in range(count):
         item_id = start_id + index
@@ -60,7 +63,7 @@ def rss_with_items(count: int, *, start_id: int = 1910000) -> bytes:
   <title>[Uploader {index}] FC2-PPV-{1000000 + index} Item {index}</title>
   <link>https://sukebei.nyaa.si/view/{item_id}</link>
   <guid isPermaLink="true">https://sukebei.nyaa.si/view/{item_id}</guid>
-  <pubDate>Sat, 14 Nov 2026 10:00:00 -0000</pubDate>
+  <pubDate>{stamp}</pubDate>
   <nyaa:seeders>1</nyaa:seeders>
   <nyaa:infoHash>{index:040x}</nyaa:infoHash>
   <nyaa:size>1.0 GiB</nyaa:size>

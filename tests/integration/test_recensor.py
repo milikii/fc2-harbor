@@ -279,3 +279,34 @@ async def migrate_and_seed(database: Database, settings: object) -> None:
                 censorship=Censorship.UNKNOWN,
             )
         )
+
+
+async def test_updated_at_is_not_touched(db: Database) -> None:
+    """``updated_at`` means "when the metadata was fetched", not "when we rescored"."""
+
+    content_id = await seed(db, title="【有】作品")
+    stamp = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.updated_at = stamp
+    async with db.session() as session:
+        before = (await session.get(Content, content_id)).updated_at  # type: ignore[union-attr]
+
+    report = RecensorReport(dry_run=False)
+    async with db.transaction() as session:
+        await recensor(session, force=False, report=report)
+
+    async with db.session() as session:
+        after = await session.get(Content, content_id)
+    assert after is not None
+    assert report.changed == 1
+    assert after.censorship is Censorship.CENSORED
+    assert after.updated_at == before
+
+
+async def test_report_explains_the_updated_at_history() -> None:
+    report = RecensorReport(dry_run=True)
+    notes = report.as_dict()["notes"]
+    assert isinstance(notes, list) and notes
+    assert any("updated_at" in str(note) for note in notes)
