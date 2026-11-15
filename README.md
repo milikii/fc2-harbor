@@ -93,13 +93,16 @@ deviation is recorded in [`docs/deviations.md`](docs/deviations.md).
 ### What M4 adds
 
 - **Push pipeline** (`app/services/publisher.py`): for every discovered content —
-  enrich once, send the cover card (tag / title / code / Nyaa link), send the full
-  description as follow-up messages when it does not fit a caption, send previews as
-  media groups of 2–10, and record every message id. Resumable after a crash: a
-  pending notification continues from the last recorded step.
-- **Cards** (`app/services/cards.py`): caption under Telegram's limit, no silent
-  truncation (overflow goes out as separate messages), short `dl:`/`blk:` callback
-  data, and `FC2-PPV-<number>` as the displayed code.
+  enrich once, send the cover card (code / tag / title / size / time / Nyaa link),
+  send the description and translation as follow-up messages when they do not fit a
+  caption, send previews as media groups of 2–10, and record every message id.
+  Resumable after a crash: a pending notification continues from the last recorded
+  step.
+- **Cards** (`app/services/cards.py`): the legacy layout — `<b>FC2-PPV-<number></b>`,
+  `🏷️ tag`, title (≤200 chars) with `💾 size · 🕒 time`, `📝` description (≤250),
+  `🇨🇳` translation (≤250), and `<a href="…">nyaa</a>`. HTML parse mode, so every
+  user-supplied string is escaped; overflow beyond the caption limit goes out as
+  separate messages. Short `dl:`/`blk:` callback data.
 - **Buttons** (`app/bots/subscription.py`): download re-checks the gate, writes the
   accepted entry and the job in one transaction, submits to qBittorrent and settles
   the button to 已下载 / 重试; a second click is idempotent. 不感兴趣 writes the

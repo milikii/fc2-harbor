@@ -44,7 +44,7 @@ ${EDITOR:-vi} .env
 | `QBITTORRENT_USERNAME` ★ | 是 | qB 用户名 |
 | `QBITTORRENT_PASSWORD` ★ | 是 | qB 密码 |
 | `TRANSMISSION_URL` / `_USERNAME` / `_PASSWORD` | 否 | 只有启用 Transmission 时才需要（默认关闭） |
-| `TRANSLATION_BASE_URL` / `_API_KEY` / `_MODEL` | 视配置 | OpenAI 兼容翻译端点。`config.yaml` 里 `translation.enabled: true` 时必填，否则启动会报错并列出缺的变量 |
+| `TRANSLATION_BASE_URL` / `_API_KEY` / `_MODEL` | 仅 `openai_compatible` | OpenAI 兼容翻译端点。`translation.provider: openai_compatible` 且 `enabled: true` 时必填，否则启动会报错并列出缺的变量。默认的 `google_free` **不需要**这三个 |
 | `JP_PROXY_URL` / `JP_BACKUP_PROXY_URL` | 视网络 | 日本出口代理（`socks5h://user:pass@host:1080`）。不需要日本代理时，把 `config.yaml` 里各 provider 的 `proxy` 改成 `direct` |
 | `FC2_LOG_LEVEL` | 否 | 覆盖 `app.log_level`（DEBUG/INFO/WARNING/ERROR） |
 | `FC2_DATABASE_URL` | 否 | 覆盖数据库路径（一般不用改） |
@@ -65,7 +65,9 @@ ${EDITOR:-vi} config/config.yaml
 2. **`storage.final_roots`**：整理后的媒体目录，容器内路径。默认 `/library/fc2` 等，对应 NAS 的 `/mnt/storage/library`。
 3. **`downloaders.qbittorrent.save_path_template`**：每个任务独立的保存目录，默认 `/downloads/{category}/{job_id}`。`{category}`/`{job_id}` 两个占位符必须保留。
 4. **`image_fetch.allowed_hosts`**：图片域名 allowlist。留空表示按各 provider 的注册域自动派生（`fc2.com`、`javdb.com`…）。想更严格就显式列出（示例配置里有注释好的列表）。
-5. **`translation.enabled`**：有翻译端点填 `true` 并配好三个 `TRANSLATION_*` 变量；**不想用翻译就显式改成 `false`**，否则启动会因为缺凭据失败（这是有意的 fail-fast）。
+5. **`translation`**：默认 `provider: google_free`（免密钥 Google 端点），只需 `enabled: true` 和 `proxy: japan`——**必须走代理**，直连会超时。不想翻译就 `enabled: false`。
+   想用 OpenAI 兼容端点就改成 `provider: openai_compatible` 并配好 `TRANSLATION_BASE_URL/_API_KEY/_MODEL`，缺一个启动就会 fail-fast。
+   翻译失败（代理不通、被限流、返回 HTML「Sorry...」页）**不会**影响卡片发送：只记 `metadata.translate_failed`，卡片里没有 `🇨🇳` 那段，日文简介照常显示。
 6. **`provider.sources.*.proxy`**：默认 `japan`。没有日本代理就全改成 `direct`，否则 provider 请求会失败。
 7. **`fc2.code_min_digits` / `code_max_digits`**：FC2 编号位数，默认 5/8，一般不用动。
 8. **`subscription.polling_enabled`**：`false` 时**完全不启动** Nyaa 轮询，只跑手动 Bot（适合先只用手动投递）。
@@ -290,7 +292,7 @@ docker compose run --rm app python scripts/import_legacy.py \
 
 | 现象 | 排查 |
 |---|---|
-| 启动即退出，日志 `configuration error` | 按提示补 `.env` 变量；`translation.enabled: true` 时必须配三个 `TRANSLATION_*` |
+| 启动即退出，日志 `configuration error` | 按提示补 `.env` 变量；`translation.provider: openai_compatible` + `enabled: true` 时必须配三个 `TRANSLATION_*`；`google_free` 只需要代理 |
 | `downloader_auth_failed` | qB 用户名/密码错（401 或 4.x 的 `Fails.`），或 qB 开了「本地认证绕过」而地址不对 |
 | `downloader_banned` | qB 因多次失败封了这个 IP（403），去 qB 设置里解封或换地址 |
 | `downloader_login_unexpected` | 登录返回了既不是 204 也不是 `Ok.` 的响应，日志里有 `status` 与 `body_bytes`，按 qB 版本核对 |
@@ -302,3 +304,5 @@ docker compose run --rm app python scripts/import_legacy.py \
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
 | `structure` 计数上涨 | 站点改版，按 `docs/deviations.md` §19 的流程补 fixture + 改 selector |
+| 卡片里没有 `🇨🇳` 译文 | 看 `metadata.translate_failed` 的 `error_code`：`non_json` 说明出口被 Google 拦（返回 HTML「Sorry...」页，换出口）；`network` 是代理不通；`length_mismatch`/`bad_response` 是端点换了格式。卡片本身不受影响 |
+| 卡片发出去但 Telegram 报 `can't parse entities` | 只可能来自我们自己拼的 HTML：检查是不是有人改了 `app/services/cards.py` 却没走 `escape_html()`；测试 `test_markup_in_content_is_escaped_before_sending` 会挡住这种回归 |

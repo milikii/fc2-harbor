@@ -207,3 +207,43 @@
   - Transmission 任务分两路：`finished` 建 `DOWNLOADED` job 交给现有整理器（成功后才删 tr 任务，`deleteFiles=false`），`incomplete` 建 `DOWNLOADING` + `qbittorrent` job 交给监控接管；**不建** tr 的下载 job（那些任务还在 tr 里做种，我们只做登记）。
 - 需要的枚举值（迁移 0003）：`accepted_origin` 增加 `legacy_import`、`legacy:transmission`；`notification_status` 增加 `legacy`、`legacy:dead`。推送队列把 `legacy` / `legacy:dead` 视为「已处理」，所以旧卡片不会再推。
 - 回滚按标记删除（`bot_name` / `origin LIKE 'legacy%'` / `source IN ('legacy','transmission')` / `reason='legacy_import'`），导入时新建的 content 用报告里的 `created_content_keys` 精确清理，见 `docs/deploy.md` 9e。
+
+## 28. 卡片排版改用旧系统模板（覆盖 §9.1 的字段顺序）
+
+- 背景：用户实测卡片「没有按钮、排版很差」，并给出旧系统（fc2bot / torrentino）的原始模板作为基准，原话「像之前的那样就还可以用」。
+- 实现（`app/services/cards.py`）：
+  - `<b>FC2-PPV-{编号}</b>` 在第一行加粗，**标题不再在第一行**；
+  - `🏷️ {有码/无码/薄码/未知}` 单独一行；
+  - 标题（空白折叠，≤200 字，超出加 `…`），下一行 `💾 {大小} · 🕒 {YYYY-MM-DD HH:MM}`，大小取 `releases.raw_payload_json["size"]`，时间按 `app.timezone` 渲染；
+  - `📝 {简介}`（空白折叠，≤250 字），`🇨🇳 {译文}`（≤250 字）；
+  - `<a href="{nyaa}">nyaa</a>` 作为最后一行，可见文字只有 `nyaa`。
+- 与 §9.1 的偏离：规格书写「正文绝不静默截断」，现在标题 200 字、简介与译文各 250 字截断并显式加 `…`。这是用户明确要求的排版基准（旧系统行为）；截断是**显式**的（省略号可见），完整原文仍保存在数据库里，需要时可查。
+- 超长兜底：整段超过 caption 上限时，caption 只留编号/标签/标题/大小时间/链接，`📝` 与 `🇨🇳` 拆成紧随其后的文本消息（顺序不变），不丢内容。
+
+## 29. 卡片使用 HTML parse_mode，所有用户来源文本转义
+
+- 背景：旧系统用 HTML parse_mode 发送；标题/简介里的 `<`、`&` 会让 Telegram 直接报错，卡片发不出去。
+- 实现：`PARSE_MODE = "HTML"`；`escape_html()`（`html.escape(quote=False)`）作用于标题、简介、译文、大小；链接用 `html.escape(quote=True)` 放进 `href`。只有编号那一行是真实标签。
+- 测试：`tests/unit/test_cards.py` 的转义组用例 + `tests/integration/test_publisher.py::test_markup_in_content_is_escaped_before_sending`。
+
+## 30. 翻译改用免密钥 Google 端点（`google_free`）
+
+- 背景：用户要求「直接用谷歌翻译」。实测可用端点是 `GET https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=ja&tl=zh-CN&q=…`（支持多个 `q` 批量、顺序对应），必须走代理；`translate.googleapis.com/translate_a/single?client=gtx` 从同一出口被 Google 判滥用并返回 HTML「Sorry...」页面。
+- 实现（`app/services/translate.py::GoogleFreeTranslator`）：
+  - `translation.provider` 支持 `google_free`（默认）与 `openai_compatible`（原实现保留）；`translation.proxy` 默认 `japan`，用代理 profile 而不是环境变量；
+  - 长文本按句子边界切到 ≤1000 字符一块，同一张卡片的多个块用多个 `q` **一次请求**发出；
+  - 响应必须是 JSON 数组且条数与块数一致；HTML「Sorry...」页（`non_json`）、空数组（`bad_response`）、长度不匹配（`length_mismatch`）都判失败；
+  - 限流每秒最多 1 次请求；`network` / `http_429` / `5xx` 重试 2 次带指数退避；其它错误不重试；
+  - 简介本身是中文（有汉字、无假名）时跳过翻译；
+  - 失败只写 `metadata.translate_failed` 日志并把 `description_zh` 留空，卡片照发（日文简介仍在）。
+- 端点固定为常量：`base_url` 属于 OpenAI 后端，混用会误导，因此 `google_free` 不接受 `base_url` 覆盖。
+
+## 31. 按钮文案带 emoji，状态更新保留官网按钮
+
+- 按钮：`⬇️ 下载` / `🚫 不感兴趣` / `🔗 FC2 官网`（旧系统文案）。
+- 状态更新（`已下载` / `重试` / `已拉黑`）改为基于**消息上已有的 markup** 原地替换第一个按钮（`settled_keyboard`），不再用 `card_keyboard_after(content_id, None, …)` 重建——后者会把「🔗 FC2 官网」按钮弄丢。
+
+## 32. 运行镜像包含 `scripts/`
+
+- 问题：Dockerfile 只 COPY `app/`、`docker/`、`docs/`，运维必须挂载源码才能跑导入器。
+- 实现：`COPY --chown=app:app scripts ./scripts`；`docker compose run --rm app python scripts/import_legacy.py …` 直接可用。

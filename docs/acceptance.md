@@ -57,8 +57,8 @@
 ## 24.6 卡片包含封面、标签、标题、日文简介、中文简介和 Nyaa 链接
 
 - 状态：**已验证**
-- 证据：`tests/unit/test_cards.py::test_short_description_stays_in_the_caption`（标签/编号/Nyaa 链接/日中简介同处 caption）、`tests/integration/test_publisher.py::test_card_with_cover_and_previews`
-- 备注：中文简介来自翻译；无翻译时卡片仍含日文简介与链接。
+- 证据：`tests/unit/test_cards.py::test_card_layout_matches_the_legacy_template`（编号加粗首行、标签行、标题、大小时间、`📝` 简介、`🇨🇳` 译文、`<a>` 链接同处 caption）、`tests/integration/test_publisher.py::test_card_with_cover_and_previews`、`::test_card_shows_size_and_time_from_the_release`
+- 备注：排版基准是旧系统模板（见 `docs/deviations.md` §28）；标题 ≤200 字、简介与译文各 ≤250 字，超出加 `…`；中文简介来自翻译，翻译失败时卡片仍含日文简介与链接（`tests/integration/test_metadata_service.py::test_translation_failure_leaves_description_empty`）。
 
 ## 24.7 预览图组紧随封面/简介消息
 

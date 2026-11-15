@@ -19,7 +19,14 @@ class FakeBot:
     def __init__(self) -> None:
         self.calls: list[tuple[int, object, str | None]] = []
 
-    async def send_photo(self, chat_id: int, photo: object, caption: str | None = None):
+    async def send_photo(
+        self,
+        chat_id: int,
+        photo: object,
+        caption: str | None = None,
+        reply_markup: object | None = None,
+        parse_mode: str | None = None,
+    ):
         self.calls.append((chat_id, photo, caption))
         return SimpleNamespace(photo=[SimpleNamespace(file_id="FILE-ABC")])
 
