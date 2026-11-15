@@ -207,7 +207,9 @@ docker compose logs -f app   # 应看到 db.migrate.done 且没有报错
 | 现象 | 排查 |
 |---|---|
 | 启动即退出，日志 `configuration error` | 按提示补 `.env` 变量；`translation.enabled: true` 时必须配三个 `TRANSLATION_*` |
-| `downloader_auth_failed` | qB 用户名/密码错，或 qB 开了「本地认证绕过」而地址不对 |
+| `downloader_auth_failed` | qB 用户名/密码错（401 或 4.x 的 `Fails.`），或 qB 开了「本地认证绕过」而地址不对 |
+| `downloader_banned` | qB 因多次失败封了这个 IP（403），去 qB 设置里解封或换地址 |
+| `downloader_login_unexpected` | 登录返回了既不是 204 也不是 `Ok.` 的响应，日志里有 `status` 与 `body_bytes`，按 qB 版本核对 |
 | `downloader_unreachable` | 容器访问不到 `QBITTORRENT_URL`；用 `docker compose exec app wget -qO- <url>` 试 |
 | 卡片收不到 | 两个 Bot 都先 `/start`；`TELEGRAM_ALLOWED_USER_IDS` 是否含你的 id；`SUBSCRIPTION_BOT_TOKEN` 是否填了 |
 | 卡片收到但按钮点了没反应 | 确认 `app.ready` 里有 `subscription-bot` 任务、`polling_bots` 包含它；按钮回调只会投递给发卡片的 Bot，订阅 Bot 没 poll 就永远收不到 |

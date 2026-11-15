@@ -178,3 +178,19 @@
 - 问题：`aiohttp-socks` / `python-socks` 只接受 `socks5://`，把 `socks5h://` 直接交给 `AiohttpSession` 会抛 `Invalid scheme component: socks5h`。而项目其余部分（httpx）用 `socks5h` 表示「由代理解析 DNS」。
 - 实现：`app/bots/factory.py::aiogram_proxy_url` 在构造 Bot 会话时把 `socks5h://` 转成 `socks5://`；python-socks 的 SOCKS5 连接器默认远程解析主机名，语义一致。
 - 理由：配置里保持统一的 `socks5h` 写法，只在 aiogram 边界做一次转换。
+
+## 25. 外部服务成功判定按版本兼容，不写死单一响应
+
+- 规格书：§14.1 添加任务、§14.2 完成判断、§15 Transmission
+- 问题：qBittorrent 5.2.3 登录成功返回 **204 + 空 body**，而 4.x 返回 **200 + `Ok.`**。按 4.x 判定会把成功当失败（实机表现为 `status=204` 的登录错误，任务全部投递失败）。
+- 实现：
+  - 登录：403 → `downloader_banned`；>=400（含 401）→ 凭据错误；204 空 body 或 200 + `Ok.` → 成功；200 + `Fails.` → 凭据错误（4.x 写法）；其它 → `downloader_login_unexpected`，报错带 `status` 与 `body_bytes`。
+  - 添加任务：只有显式 `Fails.` 才算拒绝；空 body（5.x）按「已接受」处理，任务是否可见交给 info hash 回查。
+  - provider 抓取：2xx 都算成功，不再要求恰好 200。
+  - Transmission 会话握手允许 409 连续出现（会话 id 会轮换），最多 3 次。
+  - 翻译：`message.content` 同时接受字符串与分段数组两种形态。
+- 理由：版本差异属于正常情况，判定条件应表达「语义成功」，而不是「某个版本的字节」。
+
+## 26. CookieCloud 未实现
+
+- 现状：本仓库没有 CookieCloud 相关代码或配置（`grep -i cookiecloud` 为空），因此没有可修的版本兼容问题。若后续要接入，按第 25 条的写法处理响应判定。
