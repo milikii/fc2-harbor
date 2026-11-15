@@ -1,6 +1,11 @@
 #!/bin/sh
-# Container entrypoint: apply migrations, then hand PID 1 to the application so
-# SIGTERM reaches the graceful shutdown path in app/main.py.
+# Container entrypoint.
+#
+# Applies migrations, then:
+#   * no arguments -> start the application as PID 1 (SIGTERM reaches the graceful
+#     shutdown path in app/main.py);
+#   * arguments   -> run that command instead, which is how the one-off tools are
+#     invoked, e.g. `docker compose run --rm app python scripts/import_legacy.py`.
 set -eu
 
 if [ -z "${FC2_CONFIG:-}" ]; then
@@ -15,5 +20,9 @@ fi
 
 echo "applying database migrations..."
 alembic upgrade head
+
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
 
 exec python -m app.main
