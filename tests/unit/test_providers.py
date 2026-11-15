@@ -340,48 +340,15 @@ def test_provider_ids_match_priority_order() -> None:
 # -- FC2 description: the article page only carries a truncated og:description ---
 
 
-def description_widget_page() -> str:
-    return (FIXTURES / "fc2_description_widget.html").read_text(encoding="utf-8")
+def test_fc2_marks_its_description_as_a_summary() -> None:
+    """The official page only publishes a teaser; the card layer shows it as is."""
 
-
-def article_with_description() -> ProviderPage:
-    base = page(
-        "fc2_article_with_description.html",
-        "https://adult.contents.fc2.com/article/1234567/",
+    result = provider(Fc2Provider).parse(
+        page("fc2.html", "https://adult.contents.fc2.com/article/1234567/"), make_content()
     )
-    return ProviderPage(url=base.url, html=base.html, status=base.status,
-                        extra={"description_html": description_widget_page()})
-
-
-def test_fc2_prefers_the_full_description_widget() -> None:
-    result = provider(Fc2Provider).parse(article_with_description(), make_content())
 
     assert result is not None
-    assert result.raw["description_source"] == "full"
-    # Both widget paragraphs are there, in order, and nothing is truncated.
-    assert "一行目の説明です。" in (result.description_ja or "")
-    assert "二行目の説明です。" in (result.description_ja or "")
-    assert "ファイル形式：MP4" in (result.description_ja or "")
-    assert not (result.description_ja or "").endswith("…")
-
-
-def test_fc2_full_description_has_no_page_furniture() -> None:
-    result = provider(Fc2Provider).parse(article_with_description(), make_content())
-    description = result.description_ja or ""
-
-    assert "おすすめ広告のテキスト" not in description
-    assert "QUJDREVGRw==" not in description
-    assert "TEMPLATE-FRAGMENT" not in description
-
-
-def test_fc2_full_description_normalises_whitespace() -> None:
-    result = provider(Fc2Provider).parse(article_with_description(), make_content())
-    description = result.description_ja or ""
-
-    assert "　" not in description  # full-width space folded
-    assert "  " not in description  # runs collapsed
-    assert "\n" not in description
-    assert "全角スペースの入った行 と連続スペース。" in description
+    assert result.description_quality == "summary"
 
 
 def test_fc2_falls_back_to_the_meta_description() -> None:
@@ -411,6 +378,7 @@ def test_fc2_falls_back_to_og_description_last() -> None:
 
     assert result is not None
     assert result.raw["description_source"] == "og"
+    assert result.description_quality == "summary"
     assert result.description_ja == "短い概要…"
 
 
@@ -426,45 +394,5 @@ def test_fc2_without_any_description_is_empty_not_fabricated() -> None:
 
     assert result is not None
     assert result.description_ja is None
+    assert result.description_quality is None
     assert result.raw["description_source"] is None
-
-
-async def test_fc2_fetches_the_description_widget_from_the_iframe() -> None:
-    """The widget URL comes from the article page; a second GET follows it."""
-
-    requests: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(str(request.url))
-        if "/widget/article/" in str(request.url):
-            return httpx.Response(200, text=description_widget_page())
-        return httpx.Response(
-            200,
-            text=(FIXTURES / "fc2_article_with_description.html").read_text(encoding="utf-8"),
-        )
-
-    client = HttpClient(transport=httpx.MockTransport(handler))
-    adapter = Fc2Provider(client=client, proxy_url=None, timeout_seconds=5)
-    result = await adapter.fetch(make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"))
-
-    assert result.raw["description_source"] == "full"
-    assert any("/widget/article/1234567/description" in url for url in requests)
-    await client.aclose()
-
-
-async def test_fc2_widget_failure_degrades_instead_of_failing() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "/widget/article/" in str(request.url):
-            return httpx.Response(503)
-        return httpx.Response(
-            200,
-            text=(FIXTURES / "fc2_article_with_description.html").read_text(encoding="utf-8"),
-        )
-
-    client = HttpClient(transport=httpx.MockTransport(handler))
-    adapter = Fc2Provider(client=client, proxy_url=None, timeout_seconds=5)
-    result = await adapter.fetch(make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"))
-
-    assert result.raw["description_source"] == "meta"
-    assert result.description_ja == "サンプル作品の説明 その二 その三"
-    await client.aclose()

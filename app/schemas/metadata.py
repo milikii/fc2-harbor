@@ -7,7 +7,7 @@ provider adapters agree on one shape. Provider *implementations* arrive in M3.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -44,6 +44,11 @@ class MetadataResult(BaseModel):
     content_key: str
     title_ja: str | None = None
     description_ja: str | None = None
+    #: How good ``description_ja`` is. A ``summary`` is a teaser (site-truncated
+    #: meta description or a search-result snippet); ``full`` is body text. The
+    #: coordinator lets a ``full`` description replace a ``summary`` even from a
+    #: lower-priority provider (see docs/deviations.md §35).
+    description_quality: Literal["full", "summary"] | None = None
     official_url: str | None = None
     censorship: Censorship | None = None
     release_date: datetime | None = None

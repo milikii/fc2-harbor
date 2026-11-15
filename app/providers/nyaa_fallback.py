@@ -55,6 +55,8 @@ class NyaaFallbackProvider(BaseProvider):
             content,
             title=title,
             description=description,
+            # The torrent description is the uploader's body text, not a teaser.
+            description_quality="full" if description else None,
             official_url=page.url,
             cover=cover,
             previews=images,

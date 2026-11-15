@@ -77,12 +77,14 @@ def result(
     censorship: Censorship | None = None,
     official_url: str | None = None,
     release_date: datetime | None = None,
+    description_quality: str | None = None,
 ) -> MetadataResult:
     return MetadataResult(
         provider=provider,
         content_key="fc2_ppv:1234567",
         title_ja=title,
         description_ja=description,
+        description_quality=description_quality,
         official_url=official_url,
         censorship=censorship,
         release_date=release_date,
@@ -344,3 +346,131 @@ async def test_no_providers_yields_empty_aggregate(tmp_path: Path, provider_coun
     )
     assert aggregated.title_ja is None
     assert aggregated.runs == []
+
+
+# -- description quality: a full body beats a teaser -------------------------
+
+
+async def test_full_description_replaces_a_summary_from_a_higher_priority_source(
+    tmp_path: Path,
+) -> None:
+    """Spec 7.2 amended: a teaser must not block real body text (deviations §35)."""
+
+    first = FakeProvider(
+        "Fc2", result=result("Fc2", description="70 字的摘要…", description_quality="summary")
+    )
+    second = FakeProvider(
+        "Mmtv", result=result("Mmtv", description="完整正文" * 50, description_quality="full")
+    )
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.description_ja == "完整正文" * 50
+    assert aggregated.description_quality == "full"
+    assert aggregated.sources["description_ja"] == "Mmtv"
+
+
+async def test_summary_never_replaces_a_full_description(tmp_path: Path) -> None:
+    first = FakeProvider("A", result=result("A", description="正文", description_quality="full"))
+    second = FakeProvider(
+        "B", result=result("B", description="摘要…", description_quality="summary")
+    )
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.description_ja == "正文"
+    assert aggregated.description_quality == "full"
+    assert aggregated.sources["description_ja"] == "A"
+
+
+async def test_two_summaries_keep_the_priority_order(tmp_path: Path) -> None:
+    first = FakeProvider(
+        "A", result=result("A", description="A 的摘要", description_quality="summary")
+    )
+    second = FakeProvider(
+        "B", result=result("B", description="B 的摘要", description_quality="summary")
+    )
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.description_ja == "A 的摘要"
+    assert aggregated.sources["description_ja"] == "A"
+
+
+async def test_two_full_descriptions_keep_the_priority_order(tmp_path: Path) -> None:
+    first = FakeProvider("A", result=result("A", description="A 正文", description_quality="full"))
+    second = FakeProvider("B", result=result("B", description="B 正文", description_quality="full"))
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.description_ja == "A 正文"
+    assert aggregated.sources["description_ja"] == "A"
+
+
+async def test_no_description_anywhere_stays_empty(tmp_path: Path) -> None:
+    first = FakeProvider("A", result=result("A", title="Title A"))
+    second = FakeProvider("B", result=result("B", title="Title B"))
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=0
+    )
+
+    assert aggregated.description_ja is None
+    assert aggregated.description_quality is None
+    assert "description_ja" not in aggregated.sources
+
+
+async def test_early_stop_is_kept_when_the_description_is_only_a_summary(
+    tmp_path: Path,
+) -> None:
+    """Default: do not pay eight extra requests chasing a full text that is not there."""
+
+    first = FakeProvider(
+        "Fc2",
+        result=result("Fc2", title="T", description="摘要…", description_quality="summary",
+                      previews=["https://cdn/1.jpg"]),
+    )
+    second = FakeProvider(
+        "Mmtv", result=result("Mmtv", description="正文", description_quality="full")
+    )
+
+    aggregated = await coordinator(first, second, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ctx(), min_previews=1
+    )
+
+    assert aggregated.stopped_early is True
+    assert second.calls == 0
+    assert aggregated.description_quality == "summary"
+
+
+async def test_seek_full_description_keeps_looking_past_a_summary(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings = settings.model_copy(
+        update={
+            "provider": settings.provider.model_copy(update={"seek_full_description": True})
+        }
+    )
+    first = FakeProvider(
+        "Fc2",
+        result=result("Fc2", title="T", description="摘要…", description_quality="summary",
+                      previews=["https://cdn/1.jpg"]),
+    )
+    second = FakeProvider(
+        "Mmtv", result=result("Mmtv", description="完整正文", description_quality="full")
+    )
+
+    aggregated = await coordinator(first, second, settings=settings).aggregate(
+        make_content(), ctx(), min_previews=1
+    )
+
+    assert second.calls == 1
+    assert aggregated.description_ja == "完整正文"
+    assert aggregated.description_quality == "full"

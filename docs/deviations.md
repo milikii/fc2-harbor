@@ -261,13 +261,19 @@
   - 新增 `MoveStage.CONFLICT`（只出现在错误对象与日志里，不落库，无需迁移）。
 - 理由：任何部署形态（单 mount / 多 bind mount / 真跨盘）都能工作，且慢路径可观测；数据安全优先于「少留一个目录」。
 
-## 34. Fc2 简介改为抓说明 iframe（og:description 是站点截断的摘要）
+## 34. Fc2 简介：官网只有摘要，且不抓 widget（方案已回退）
 
-- 问题：`og:description` 被官网自己截到约 70 字（实测 `FC2-PPV-5007844` 的 og 值以 `…` 结尾），而文章页里**没有**简介正文——它把正文放在 iframe `/widget/article/<number>/description?ac=<token>` 里。`ac` 每次页面加载都变，必须从文章页当场解析。
-- 实现（`app/providers/fc2.py`）：
-  - `fetch_extra()` 从 `iframe[data-iframe='description']` 取 `src`，带 `Referer` 再抓一次（同一个 `HttpClient` 的 cookie jar 保证 `CONTENTS_FC2_PHPSESSID` 生效，否则 widget 返回「読み込みに失敗しました」）；
-  - widget 里取 `body > div[data-container]`，递归拼接文本（`<br>` → 换行），**跳过**带 `class` 的广告块、`script`/`style`、以及 `display:none` / `opacity:0` / `height:0` 的隐藏追踪节点；
-  - 回退链：widget 全文 → `meta[name=description]` → `og:description`；来源记在 `raw["description_source"] = "full" | "meta" | "og"`；
-  - 空白（含全角空格 U+3000）折叠成单空格，**不截断**——截断只发生在卡片层。
-- 验证：真实页面 `fc2_ppv:5007844` 抓取结果 `description_source="full"`、简介 1673 字（原来 70 字）。fixture 是按真实 DOM 结构脱敏构造的，见 `tests/fixtures/providers/README.md`。
-- 其它 8 个 provider 检查过：只有 Fc2 用 `og:description`；其余取的是搜索结果卡片里的 `.card-text` / `.entry-summary` 等片段，属于「非权威源只补空缺」的定位，不改。
+- 实测（2026-11-15，经日本代理）：`og:description` 被官网截到约 70 字（`FC2-PPV-5007844` 以 `…` 结尾）；`meta[name=description]` 稍长（约 180 字）但同样是摘要。文章页本身**没有**正文，正文在 iframe `/widget/article/<number>/description?ac=<token>` 里。
+- 曾实现过 widget 抓取（解析 iframe `src`、带 cookie 二次请求、跳过广告块与 base64 追踪节点），实测能拿到 1673 字全文。**用户明确否掉**（「不需要用官网的，其他源就非常好抓」），已整体撤除，`BaseProvider.fetch_extra()` 钩子保留作为通用能力。
+- 现状：Fc2 只取 `meta[name=description]` → `og:description`，标 `description_quality="summary"`，`raw["description_source"]` 记 `"meta" | "og" | null`。
+
+## 35. 简介质量语义：全文可以覆盖高优先级的摘要
+
+- 背景：§7.2 规定「按 provider 优先级逐字段合并，已有值不被覆盖」。如果 Fc2 用 70 字摘要占住 `description_ja`，后面 javdb/mmtv 即便有正文也补不进来。
+- 实现：
+  - `MetadataResult.description_quality: "full" | "summary" | None`；
+  - Fc2 的 meta/og 摘要 → `summary`；搜索结果卡片片段（avsox / fc2_hub / freejavbt / javlibrary / madou / miss_av / mmtv）→ `summary`；Nyaa 种子详情页的 `.panel-body` 上传者说明 → `full`；
+  - 合并规则（`MetadataCoordinator._merge`）：空槽直接填；**`full` 可以替换已有的 `summary`，与 provider 优先级无关**；`summary` 永不替换 `full`；同为 `full` 或同为 `summary` 时按原优先级，先到先得。替换时打 `provider.description_upgraded` 日志并在 `sources["description_ja"]` 记下真正的来源。
+- 对 §7.2 的补充说明：唯一允许「低优先级覆盖高优先级」的情形就是「高优先级只给了摘要、低优先级给了正文」。标题、封面、官网地址、日期等其它字段仍然严格按优先级，绝不被覆盖。
+- 提前停止：默认 `provider.seek_full_description: false`——一旦核心字段与预览图齐了就停，不为一个大概率不存在的全文多打 8 次请求。设为 `true` 时，只有拿到 `full` 才允许提前停止。
+- 实测结论（见 §34 与交付报告）：**当前配置的九个源里没有任何一个能给 FC2 内容的完整简介**（javdb 详情页需登录、javten/javlibrary/missav 403、avsox 是 JS 空壳、mmtv/freejavbt/madou 不索引 FC2 编号）。因此线上卡片显示的是摘要，属预期行为。

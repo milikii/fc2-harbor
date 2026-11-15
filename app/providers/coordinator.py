@@ -24,6 +24,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from app.config import Settings
 from app.db.enums import Censorship
@@ -77,6 +78,7 @@ class AggregatedMetadata:
     content_key: str
     title_ja: str | None = None
     description_ja: str | None = None
+    description_quality: Literal["full", "summary"] | None = None
     official_url: str | None = None
     censorship: Censorship = Censorship.UNKNOWN
     release_date: datetime | None = None
@@ -94,6 +96,7 @@ class AggregatedMetadata:
         return {
             "title_ja": self.title_ja,
             "description_ja": self.description_ja,
+            "description_quality": self.description_quality,
             "official_url": self.official_url,
             "censorship": self.censorship.value,
             "release_date": self.release_date.isoformat() if self.release_date else None,
@@ -102,6 +105,17 @@ class AggregatedMetadata:
             "sources": dict(self.sources),
             "stopped_early": self.stopped_early,
         }
+
+
+def _description_wins(aggregated: AggregatedMetadata, result: MetadataResult) -> bool:
+    """``full`` replaces ``summary``; otherwise only an empty slot is filled."""
+
+    if aggregated.description_ja is None:
+        return True
+    return (
+        aggregated.description_quality == "summary"
+        and result.description_quality == "full"
+    )
 
 
 class MetadataCoordinator:
@@ -117,6 +131,7 @@ class MetadataCoordinator:
         self.settings = settings
         self.nyaa_fallback = nyaa_fallback
         self.metrics = metrics
+        self.seek_full_description = settings.provider.seek_full_description
         self._failures: dict[str, int] = {}
 
     async def aggregate(
@@ -137,7 +152,11 @@ class MetadataCoordinator:
 
         for provider in self.providers:
             await self._run_and_merge(provider, content, ctx, aggregated, limit)
-            if aggregated.core_complete() and len(aggregated.previews) >= minimum:
+            if (
+                aggregated.core_complete()
+                and len(aggregated.previews) >= minimum
+                and self._description_is_good_enough(aggregated)
+            ):
                 aggregated.stopped_early = True
                 _log.info(
                     "metadata.early_stop",
@@ -157,6 +176,13 @@ class MetadataCoordinator:
 
         aggregated.previews = aggregated.previews[:limit]
         return aggregated
+
+    def _description_is_good_enough(self, aggregated: AggregatedMetadata) -> bool:
+        """Early stop is only allowed once the description is not just a teaser."""
+
+        if not self.seek_full_description:
+            return True
+        return aggregated.description_quality == "full"
 
     # -- internals ----------------------------------------------------------
 
@@ -289,9 +315,20 @@ class MetadataCoordinator:
         if result.title_ja and aggregated.title_ja is None:
             aggregated.title_ja = result.title_ja
             aggregated.sources["title_ja"] = result.provider
-        if result.description_ja and aggregated.description_ja is None:
+        # Description: a full body always beats a teaser, regardless of provider
+        # order; otherwise the first value wins (spec 7.2 priority).
+        if result.description_ja and _description_wins(aggregated, result):
+            replaced = aggregated.description_ja is not None
             aggregated.description_ja = result.description_ja
+            aggregated.description_quality = result.description_quality
             aggregated.sources["description_ja"] = result.provider
+            if replaced:
+                _log.info(
+                    "provider.description_upgraded",
+                    provider=result.provider,
+                    quality=result.description_quality,
+                    content_key=aggregated.content_key,
+                )
         if result.official_url and aggregated.official_url is None:
             aggregated.official_url = result.official_url
             aggregated.sources["official_url"] = result.provider

@@ -49,6 +49,7 @@ class MmtvProvider(BaseProvider):
                 content,
                 title=title,
                 description=first_text(card, (".description", "p")),
+                description_quality="summary",
                 official_url=absolute_url(
                     link_node.attributes.get("href") if link_node else None, page.url
                 ),

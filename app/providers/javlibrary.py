@@ -62,6 +62,7 @@ class JavlibraryProvider(BaseProvider):
             content,
             title=title,
             description=info,
+            description_quality="summary",
             official_url=page.url,
             cover=cover,
             previews=previews,

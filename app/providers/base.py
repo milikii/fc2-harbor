@@ -281,6 +281,7 @@ class BaseProvider:
         *,
         title: str | None = None,
         description: str | None = None,
+        description_quality: str | None = None,
         official_url: str | None = None,
         censorship: object = None,
         release_date: object = None,
@@ -299,6 +300,7 @@ class BaseProvider:
             content_key=content.canonical_key,
             title_ja=clean_text(title),
             description_ja=clean_text(description),
+            description_quality=description_quality,  # type: ignore[arg-type]
             official_url=official_url,
             censorship=censorship,  # type: ignore[arg-type]
             release_date=release_date,  # type: ignore[arg-type]

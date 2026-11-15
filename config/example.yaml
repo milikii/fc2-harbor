@@ -65,6 +65,11 @@ provider:
   # one is disabled; set this to false only to switch a broken source off
   # temporarily — that is logged and audited at startup.
   strict_enabled: true
+  # Keep querying lower-priority providers while the description is only a
+  # summary, hoping for real body text. Costs one request per remaining provider
+  # per card; measurement found no free source with a full FC2 description, so
+  # this stays off. The merge rule (full beats summary) always applies.
+  seek_full_description: false
   # Fixed order, never reordered by hit rate (spec 7.1). Validated at startup.
   priorities:
     jav_fc2: [Fc2, fc2_hub, Javdb, Mmtv, freejavbt, miss_av, Javlibrary, avsox, Madou]

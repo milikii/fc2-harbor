@@ -51,6 +51,7 @@ class AvsoxProvider(BaseProvider):
                 content,
                 title=title,
                 description=first_text(card, (".description", "p")),
+                description_quality="summary",
                 official_url=absolute_url(link.attributes.get("href") if link else None, page.url),
                 cover=absolute_url(image.attributes.get("src") if image else None, page.url),
                 raw={"provider_url": page.url, "matched": True},

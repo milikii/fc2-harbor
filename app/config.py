@@ -457,6 +457,12 @@ class ProviderSection(_FrozenModel):
     #: explicitly relax it to switch off one broken source, which is then
     #: logged and audited at startup.
     strict_enabled: bool = True
+    #: When true, the coordinator keeps asking lower-priority providers while the
+    #: description is only a ``summary``, hoping one of them has real body text.
+    #: Costs up to one request per remaining provider per card, so it defaults to
+    #: false: measurement showed no free source has a full FC2 description
+    #: (docs/deviations.md §35). The merge rule itself always applies.
+    seek_full_description: bool = False
 
     @field_validator("priorities")
     @classmethod
