@@ -51,6 +51,10 @@ class AcceptedOrigin(StrEnum):
     SUBSCRIPTION_BUTTON = "subscription_button"
     MANUAL = "manual"
     ADMIN = "admin"
+    #: Imported from the legacy fc2bot/torrentino state.
+    LEGACY_IMPORT = "legacy_import"
+    #: Adopted from an existing Transmission task (still seeding elsewhere).
+    LEGACY_TRANSMISSION = "legacy:transmission"
 
 
 class DownloaderName(StrEnum):
@@ -88,6 +92,11 @@ class NotificationStatus(StrEnum):
     SENT = "sent"
     DELETED = "deleted"
     FAILED = "failed"
+    #: Card already delivered by the legacy system; never re-pushed.
+    LEGACY = "legacy"
+    #: Legacy record that was seen but never delivered (download failed); also
+    #: never re-pushed, but not blacklisted either.
+    LEGACY_DEAD = "legacy:dead"
 
 
 class GateReason(StrEnum):

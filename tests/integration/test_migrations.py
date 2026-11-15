@@ -36,7 +36,7 @@ async def test_all_spec_tables_exist(db: Database) -> None:
 async def test_migration_head_is_applied(db: Database) -> None:
     async with db.session() as session:
         version = await session.scalar(text("SELECT version_num FROM alembic_version"))
-    assert version == "0002_content_backfilled"
+    assert version == "0003_legacy_import_enums"
 
 
 async def _content(db: Database, key: str = "fc2_ppv:1234567") -> str:
@@ -207,7 +207,7 @@ def test_upgrade_flags_existing_contents_as_backfilled(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert flagged == 3
-    assert version == "0002_content_backfilled"
+    assert version == "0003_legacy_import_enums"
 
 
 async def test_counts_helper(db: Database) -> None:
