@@ -143,6 +143,7 @@ async def run(settings: Settings) -> None:
         image_fetcher = ImageFetcher(
             cache_dir=Path(settings.image_fetch.cache_dir),
             allowed_hosts=derive_image_allowlist(settings),
+            strict_allowlist=settings.image_fetch.strict_allowlist,
             max_bytes=settings.image_fetch.max_bytes,
             user_agent=settings.nyaa.user_agent,
         )

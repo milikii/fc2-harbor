@@ -652,7 +652,13 @@ class ImageFetchSection(_FrozenModel):
     max_previews: int = Field(default=9, ge=1, le=10)
     min_preview_images: int = Field(default=3, ge=0, le=10)
     cdn_routes: dict[str, str] = Field(default_factory=dict)
+    #: Only consulted when ``strict_allowlist`` is true.
     allowed_hosts: list[str] = Field(default_factory=list)
+    #: ``false`` (default): any public host is fetched — the SSRF guard (resolved IP
+    #: must be public, re-checked on every redirect hop) is the real boundary, and a
+    #: host allowlist cannot cover the third-party image hosts Nyaa descriptions use
+    #: (imagetwist, kr-av, …). ``true``: keep the allowlist for locked-down installs.
+    strict_allowlist: bool = False
 
     @field_validator("cdn_routes")
     @classmethod

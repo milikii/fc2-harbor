@@ -456,3 +456,16 @@
   - **只翻译前 400 字**（`TRANSLATE_MAX_CHARS`）：卡片只显示 250 字预览，翻 1600 字纯浪费时间；
   - 配置 `translation.fallback_provider: mymemory`（默认）/ `none`（关闭）。
 - 实测（经日本代理）：`18歳の新人少女が初撮影に挑戦しました…` → `一位18岁的新人少女挑战了她的首次拍摄。请欣赏她虽然紧张但仍努力表现的样子。`
+
+## 54. 图片白名单改为「默认宽松、可收紧」（`image_fetch.strict_allowlist`）
+
+- 问题：Nyaa 种子描述里的封面图挂在第三方图床（imagetwist、kr-av…），而 `image_fetch.allowed_hosts` 只含 provider 域名，于是 `metadata.image_rejected host_not_allowed` → `assets=0` → `cover_status` 永远不 ready → `require_cover` 把所有卡片挡住（实测 341/374 内容无封面、8 个 `give_up`）。
+- 实现（`app/network/image_fetcher.py`）：
+  - 新增 `strict_allowlist`（默认 **false**）。false 时**不校验域名**，只保留真正的安全边界：解析出的 IP 必须是公网、字面量 IP 也要查、**每一跳重定向都重新校验**；
+  - true 时沿用原白名单（`allowed_hosts` 为空即拒绝一切）；
+  - 私网/回环/链路本地/云元数据（169.254.169.254）/IPv6 ULA 一律拒绝，两种模式都生效；
+  - 大小上限、`Content-Type` 白名单、Pillow 解码、像素炸弹防护全部保留（有测试守住）。
+- 日志：`image.allowed_by_ip_only`（宽松模式放行了白名单外的公网域名）、`image.rejected_private_ip`（带 `reason=literal_ip|dns` 和地址）、`image.rejected_content_type`、`image.rejected_size`。
+- 校验顺序调整：字面量私网 IP 在**域名白名单之前**判定，这样 `https://127.0.0.1/…` 报 `ssrf_blocked` 而不是 `host_not_allowed`，排查时更准确。
+- 实测：`picsum.photos`、`httpbin.org/image/png`（都不在白名单）经代理抓取、解码、落盘成功。
+- 已知遗留：`kr-av.com/upload/…jpg` 这类链接返回的是 **HTML 图片查看页**（`text/html`，29KB），不是图片本身——现在会明确报 `bad_content_type` 而不是静默失败，但这类图床还需要「解析查看页找真实图片 URL」的能力，属于后续工作。

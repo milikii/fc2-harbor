@@ -103,6 +103,7 @@ class ImageFetcher:
         *,
         cache_dir: Path,
         allowed_hosts: Iterable[str] = (),
+        strict_allowlist: bool = False,
         max_bytes: int = DEFAULT_MAX_BYTES,
         timeout_seconds: float = 20.0,
         max_redirects: int = 3,
@@ -112,6 +113,7 @@ class ImageFetcher:
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.allowed_hosts = tuple(host.strip().lower() for host in allowed_hosts if host)
+        self.strict_allowlist = strict_allowlist
         self.max_bytes = max_bytes
         self.max_redirects = max_redirects
         self._timeout = httpx.Timeout(timeout_seconds)
@@ -155,13 +157,20 @@ class ImageFetcher:
             raise ImageFetchError("bad_url", f"image url has no host: {url!r}")
         if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
             raise ImageFetchError("ssrf_blocked", f"refusing local host: {host}")
-        if not self._host_allowed(host):
-            raise ImageFetchError("host_not_allowed", f"host not allowlisted: {host}")
-
+        # A literal private address is an SSRF attempt in either mode, and saying so
+        # is more useful than "host not allowlisted".
         if _looks_like_ip(host):
             if not is_public_ip(host):
+                _log.warning("image.rejected_private_ip", host=host, reason="literal_ip")
                 raise ImageFetchError("ssrf_blocked", f"refusing private address: {host}")
             return host
+
+        if self.strict_allowlist and not self._host_allowed(host):
+            raise ImageFetchError("host_not_allowed", f"host not allowlisted: {host}")
+        if not self.strict_allowlist and self.allowed_hosts and not self._host_allowed(host):
+            # Visible on purpose: "we fetched from a host outside the list because
+            # its address is public" must be explainable from the logs.
+            _log.info("image.allowed_by_ip_only", host=host)
 
         try:
             addresses = self._resolver(host)
@@ -171,6 +180,9 @@ class ImageFetcher:
             raise ImageFetchError("dns_failed", f"no address for {host}")
         for address in addresses:
             if not is_public_ip(address):
+                _log.warning(
+                    "image.rejected_private_ip", host=host, address=address, reason="dns"
+                )
                 raise ImageFetchError(
                     "ssrf_blocked", f"{host} resolves to a non-public address: {address}"
                 )
@@ -178,9 +190,8 @@ class ImageFetcher:
 
     def _host_allowed(self, host: str) -> bool:
         if not self.allowed_hosts:
-            # No allowlist configured means "no host is implicitly trusted"; the
-            # caller must derive it from the provider configuration.
-            raise ImageFetchError("no_allowlist", "image_fetch.allowed_hosts is empty")
+            # With ``strict_allowlist`` on, an empty list trusts nothing.
+            return not self.strict_allowlist
         return any(
             host == allowed or host.endswith("." + allowed) for allowed in self.allowed_hosts
         )
@@ -235,11 +246,22 @@ class ImageFetcher:
                     (response.headers.get("content-type") or "").split(";")[0].strip().lower()
                 )
                 if content_type not in ALLOWED_CONTENT_TYPES:
+                    _log.warning(
+                        "image.rejected_content_type",
+                        domain=urlsplit(url).hostname,
+                        content_type=content_type,
+                    )
                     raise ImageFetchError(
                         "bad_content_type", f"unsupported image type {content_type!r}"
                     )
                 declared = response.headers.get("content-length")
                 if declared and declared.isdigit() and int(declared) > self.max_bytes:
+                    _log.warning(
+                        "image.rejected_size",
+                        domain=urlsplit(url).hostname,
+                        declared_bytes=int(declared),
+                        limit=self.max_bytes,
+                    )
                     raise ImageFetchError(
                         "too_large", f"declared size {declared} exceeds {self.max_bytes}"
                     )

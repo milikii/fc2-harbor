@@ -64,8 +64,9 @@ ${EDITOR:-vi} config/config.yaml
    如果你在 qB 里把下载目录设成了别的（例如 `/downloads2`），就在这里加一条映射；**未映射的路径会让任务失败，系统不会猜**。
 2. **`storage.final_roots`**：整理后的媒体目录，容器内路径。默认 `/library/fc2` 等，对应 NAS 的 `/mnt/storage/library`。
 3. **`downloaders.qbittorrent.save_path_template`**：每个任务独立的保存目录，默认 `/downloads/{category}/{job_id}`。`{category}`/`{job_id}` 两个占位符必须保留。
-4. **`image_fetch.allowed_hosts`**：图片域名 allowlist。留空表示按各 provider 的注册域自动派生（`fc2.com`、`javdb.com`…）。想更严格就显式列出（示例配置里有注释好的列表）。
-5. **`translation`**：默认 `provider: google_free`（免密钥 Google 端点），只需 `enabled: true` 和 `proxy: japan`——**必须走代理**，直连会超时。不想翻译就 `enabled: false`。
+4. **`image_fetch.strict_allowlist`**：默认 `false`，**不按域名拦图**，只要求解析出的 IP 是公网、且每一跳重定向都重新校验（这才是防 SSRF 的真正边界）。Nyaa 的封面图挂在第三方图床，白名单列不全，所以默认宽松。需要严格控制的部署把它设为 `true`，此时 `allowed_hosts` 才会生效。
+5. **`image_fetch.allowed_hosts`**：图片域名 allowlist。留空表示按各 provider 的注册域自动派生（`fc2.com`、`javdb.com`…）。想更严格就显式列出（示例配置里有注释好的列表）。
+6. **`translation`**：默认 `provider: google_free`（免密钥 Google 端点），只需 `enabled: true` 和 `proxy: japan`——**必须走代理**，直连会超时。不想翻译就 `enabled: false`。
    想用 OpenAI 兼容端点就改成 `provider: openai_compatible` 并配好 `TRANSLATION_BASE_URL/_API_KEY/_MODEL`，缺一个启动就会 fail-fast。
    翻译失败（代理不通、被限流、返回 HTML「Sorry...」页）**不会**影响卡片发送：只记 `metadata.translate_failed`，卡片里没有 `🇨🇳` 那段，日文简介照常显示。
    Google 被限流时会自动降级到 **MyMemory**（`translation.fallback_provider: mymemory`，设 `none` 关闭）；两者都失败才留空。只翻译前 400 字。

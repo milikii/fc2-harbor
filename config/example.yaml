@@ -141,6 +141,11 @@ proxy_profiles:
   japan_backup: {type: http, url: "${JP_BACKUP_PROXY_URL}", region: JP}
 
 image_fetch:
+  # Default: fetch any host whose resolved address is public. The SSRF guard (public
+  # IP only, re-checked on every redirect hop) is the real boundary — Nyaa posts link
+  # images on third-party hosts (imagetwist, kr-av, …) that a host list cannot cover.
+  # Set true to also enforce `allowed_hosts` (locked-down installs).
+  strict_allowlist: false
   default_proxy: inherit_provider
   # Content-addressed image cache, on local disk (spec 19).
   cache_dir: /app/data/cache/images
