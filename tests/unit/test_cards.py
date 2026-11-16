@@ -72,9 +72,7 @@ def test_card_layout_matches_the_legacy_template() -> None:
         "サンプル作品タイトル\n"
         "💾 3.72 GiB · 🕒 2025-11-15 03:01\n"
         "\n"
-        "📝 短い説明。\n"
-        "\n"
-        "🇨🇳 简短说明。\n"
+        "📝 简短说明。\n"
         '<a href="https://sukebei.nyaa.si/view/4761220">nyaa</a>'
     )
 
@@ -94,11 +92,9 @@ def test_meta_line_uses_the_dot_separator() -> None:
     assert "💾 3.72 GiB · 🕒 2025-11-15 03:01" in caption
 
 
-def test_missing_size_keeps_the_time() -> None:
+def test_missing_size_shows_a_dash_and_keeps_the_time() -> None:
     caption = build_card_messages(card(size_text=None)).caption
-    assert "🕒 2025-11-15 03:01" in caption
-    assert "💾" not in caption
-    assert "·" not in caption.splitlines()[3]
+    assert "💾 - · 🕒 2025-11-15 03:01" in caption
 
 
 def test_missing_time_keeps_the_size() -> None:
@@ -107,11 +103,11 @@ def test_missing_time_keeps_the_size() -> None:
     assert "🕒" not in caption
 
 
-def test_missing_size_and_time_drop_the_line_entirely() -> None:
+def test_missing_size_and_time_still_render_the_line() -> None:
     caption = build_card_messages(card(size_text=None, published_at=None)).caption
-    assert "💾" not in caption
+    assert "💾 -" in caption
     assert "🕒" not in caption
-    assert "サンプル作品タイトル\n\n📝" in caption
+    assert "サンプル作品タイトル\n💾 -\n" in caption
 
 
 def test_link_renders_as_anchor_text() -> None:
@@ -124,7 +120,7 @@ def test_link_renders_as_anchor_text() -> None:
 def test_missing_link_drops_the_line() -> None:
     caption = build_card_messages(card(nyaa_url="")).caption
     assert "<a href" not in caption
-    assert caption.endswith("🇨🇳 简短说明。")
+    assert caption.endswith("📝 简短说明。")
 
 
 def test_naive_timestamp_is_read_as_utc() -> None:
@@ -165,9 +161,9 @@ def test_description_markup_is_escaped() -> None:
     caption = build_card_messages(
         card(description_ja="<i>あ</i> & 説明", description_zh="<u>译文</u> & 内容")
     ).caption
-    assert "<i>" not in caption
-    assert "&lt;i&gt;" in caption
-    assert "&lt;u&gt;" in caption
+    # The translation wins (one 📝 block) and its markup is escaped.
+    assert "<u>" not in caption
+    assert "&lt;u&gt;译文&lt;/u&gt; &amp; 内容" in caption
 
 
 def test_url_in_the_anchor_is_escaped() -> None:
@@ -180,7 +176,7 @@ def test_url_in_the_anchor_is_escaped() -> None:
 def test_escaped_description_still_goes_out_escaped() -> None:
     long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
     messages = build_card_messages(
-        card(description_ja="<b>あ</b> 説明", nyaa_url=long_url)
+        card(description_ja="<b>あ</b> 説明", description_zh=None, nyaa_url=long_url)
     )
     assert messages.has_overflow is True
     assert all("<b>" not in text for text in messages.extra_texts)
@@ -194,7 +190,7 @@ def test_a_card_that_fits_is_sent_complete() -> None:
     """Spec 9.1: nothing is truncated when the whole card fits in the caption."""
 
     long_but_fitting = "あ" * 400
-    messages = build_card_messages(card(description_ja=long_but_fitting))
+    messages = build_card_messages(card(description_ja=long_but_fitting, description_zh=None))
 
     assert messages.extra_texts == ()
     assert long_but_fitting in messages.caption
@@ -208,10 +204,10 @@ def test_overflow_caption_keeps_a_truncated_preview() -> None:
     long_zh = "中" * 2000
     messages = build_card_messages(card(description_ja=long_ja, description_zh=long_zh))
 
-    preview_ja = messages.caption.split("📝 ")[1].split("\n")[0]
-    preview_zh = messages.caption.split("🇨🇳 ")[1].split("\n")[0]
-    assert len(preview_ja) == CARD_DESCRIPTION_MAX and preview_ja.endswith("…")
-    assert len(preview_zh) == CARD_DESCRIPTION_MAX and preview_zh.endswith("…")
+    # One 📝 block: the translation wins and is previewed at 250 characters.
+    preview = messages.caption.split("📝 ")[1].split("\n")[0]
+    assert len(preview) == CARD_DESCRIPTION_MAX and preview.endswith("…")
+    assert "🇨🇳" not in messages.caption
     assert len(messages.caption) <= CAPTION_LIMIT
 
 
@@ -230,7 +226,7 @@ def test_overflow_sends_the_complete_translation_untruncated() -> None:
     messages = build_card_messages(card(description_ja=None, description_zh=long_zh))
 
     assert messages.has_overflow is True
-    assert messages.extra_texts[0] == f"🇨🇳 {long_zh}"
+    assert messages.extra_texts[0] == f"📝 {long_zh}"
 
 
 def test_caption_title_is_truncated_when_it_does_not_fit() -> None:
@@ -241,7 +237,9 @@ def test_caption_title_is_truncated_when_it_does_not_fit() -> None:
 
 
 def test_whitespace_is_collapsed_in_the_description() -> None:
-    caption = build_card_messages(card(description_ja="一行目\n\n二行目   三行目")).caption
+    caption = build_card_messages(
+        card(description_ja="一行目\n\n二行目   三行目", description_zh=None)
+    ).caption
     assert "📝 一行目 二行目 三行目" in caption
 
 
@@ -271,21 +269,24 @@ def test_overflow_keeps_identity_and_link_in_the_caption() -> None:
     assert caption.endswith(">nyaa</a>")
 
 
-def test_overflow_sends_description_then_translation() -> None:
+def test_overflow_sends_one_complete_body_message() -> None:
     messages = build_card_messages(card(nyaa_url="https://sukebei.nyaa.si/view/" + "9" * 900))
+    assert len(messages.extra_texts) == 1
     assert messages.extra_texts[0].startswith("📝 ")
-    assert messages.extra_texts[1].startswith("🇨🇳 ")
 
 
-def test_chinese_translation_is_rendered_when_present() -> None:
-    messages = build_card_messages(card(description_zh="这是中文翻译。"))
-    assert "🇨🇳 这是中文翻译。" in messages.caption
+def test_chinese_translation_wins_over_the_japanese_text() -> None:
+    messages = build_card_messages(
+        card(description_ja="日本語の説明", description_zh="这是中文翻译。")
+    )
+    assert "📝 这是中文翻译。" in messages.caption
+    assert "日本語の説明" not in messages.caption
 
 
-def test_translation_alone_still_renders() -> None:
-    messages = build_card_messages(card(description_ja=None, description_zh="只有翻译。"))
-    assert "🇨🇳 只有翻译。" in messages.caption
-    assert "📝" not in messages.caption
+def test_japanese_is_used_when_there_is_no_translation() -> None:
+    messages = build_card_messages(card(description_ja="日本語だけ。", description_zh=None))
+    assert "📝 日本語だけ。" in messages.caption
+    assert "🇨🇳" not in messages.caption
 
 
 def test_no_description_means_no_description_block() -> None:
@@ -403,3 +404,54 @@ def test_a_real_length_description_takes_the_follow_up_path() -> None:
     assert messages.has_overflow is True
     assert len(messages.caption) <= CAPTION_LIMIT
     assert messages.extra_texts[0] == f"📝 {real_length}"
+
+
+# -- the title never repeats the code ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_title",
+    [
+        "FC2-PPV-1234567 作品タイトル",
+        "FC2-1234567 作品タイトル",
+        "FC2PPV1234567 作品タイトル",
+        "FC2 PPV 1234567 作品タイトル",
+        "fc2_ppv_1234567 作品タイトル",
+        "fc2.ppv.01234567 作品タイトル",
+        "+++ FC2-PPV-1234567 作品タイトル",
+    ],
+)
+def test_the_code_is_stripped_from_the_title(raw_title: str) -> None:
+    caption = build_card_messages(card(title=raw_title)).caption
+    title_line = caption.splitlines()[3]
+
+    assert title_line == "作品タイトル"
+
+
+def test_a_title_that_is_only_the_code_falls_back_to_the_display_code() -> None:
+    caption = build_card_messages(card(title="FC2-PPV-1234567")).caption
+    assert caption.splitlines()[3] == "FC2-PPV-1234567"
+
+
+def test_a_missing_title_falls_back_to_the_display_code() -> None:
+    caption = build_card_messages(card(title=None)).caption
+    assert caption.splitlines()[3] == "FC2-PPV-1234567"
+
+
+def test_the_title_is_truncated_to_two_hundred_characters() -> None:
+    caption = build_card_messages(card(title="題" * 2000, description_zh=None)).caption
+    title_line = caption.splitlines()[3]
+    assert len(title_line) == CARD_TITLE_MAX
+    assert title_line.endswith("…")
+
+
+def test_the_description_is_truncated_to_two_hundred_fifty_characters() -> None:
+    caption = build_card_messages(card(description_zh="中" * 2000)).caption
+    block = caption.split("📝 ")[1].split("\n")[0]
+    assert len(block) == CARD_DESCRIPTION_MAX
+    assert block.endswith("…")
+
+
+def test_the_size_falls_back_to_a_dash() -> None:
+    caption = build_card_messages(card(size_text=None)).caption
+    assert "💾 - · 🕒" in caption

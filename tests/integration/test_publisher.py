@@ -178,7 +178,8 @@ async def test_card_with_cover_and_previews(db: Database, tmp_path: Path) -> Non
     chat_id, _photo, caption, _poster_id = bot.photos[0]
     assert chat_id == settings.telegram.allowed_user_ids[0]
     assert caption and "FC2-PPV-1234567" in caption
-    assert caption and "作品の説明です。" in caption
+    # One 📝 block: the Chinese translation wins over the Japanese text.
+    assert caption and "📝 作品说明。" in caption
     assert len(bot.groups) == 1
     assert len(bot.groups[0][1]) == 2
 
@@ -273,10 +274,9 @@ async def test_long_content_truncates_the_caption_and_sends_the_full_text(
     assert "…" in caption
     assert "あ" * 260 not in caption  # caption keeps only the identifying block
     assert "中" * 260 not in caption
-    # The complete description and translation follow as text messages.
-    assert len(bot.messages) == 2
-    assert bot.messages[0][1] == f"📝 {'あ' * 2000}"
-    assert bot.messages[1][1] == f"🇨🇳 {'中' * 2000}"
+    # The complete body (translation wins) follows as one text message.
+    assert len(bot.messages) == 1
+    assert bot.messages[0][1] == f"📝 {'中' * 2000}"
 
 
 async def test_overflow_falls_back_to_follow_up_messages(db: Database, tmp_path: Path) -> None:
@@ -501,8 +501,8 @@ async def test_card_survives_a_release_without_size(db: Database, tmp_path: Path
     await publisher.publish_once()
 
     caption = bot.messages[0][1]
-    assert "💾" not in caption
-    assert "🕒 2025-11-15 03:01" in caption
+    # A missing size shows "-" instead of dropping the line.
+    assert "💾 - · 🕒 2025-11-15 03:01" in caption
 
 
 async def test_card_is_sent_with_html_parse_mode(db: Database, tmp_path: Path) -> None:
@@ -560,8 +560,9 @@ async def test_markup_in_content_is_escaped_before_sending(
     caption = bot.messages[0][1]
     assert "<b>強調</b>" not in caption
     assert "&lt;b&gt;強調&lt;/b&gt; &amp; 100%" in caption
-    assert "&lt;i&gt;斜体&lt;/i&gt;" in caption
+    # The translation wins, and its markup is escaped too.
     assert "&lt;u&gt;下划线&lt;/u&gt;" in caption
+    assert "<u>" not in caption
     # Only the code line keeps real markup.
     assert caption.count("<b>") == 1
 

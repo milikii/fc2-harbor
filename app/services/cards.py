@@ -12,6 +12,7 @@ Two hard rules from the spec:
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -37,7 +38,6 @@ META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
 META_SIZE_ONLY_TEMPLATE = "💾 {size}"
 META_TIME_ONLY_TEMPLATE = "🕒 {published}"
 DESCRIPTION_PREFIX = "📝 "
-ZH_PREFIX = "🇨🇳 "
 LINK_TEMPLATE = '<a href="{url}">nyaa</a>'
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 
@@ -133,11 +133,26 @@ def truncate(text: str, limit: int) -> str:
     return text[: max(limit - 1, 0)].rstrip() + "…"
 
 
-def clean_title(title: str | None, fallback: str, *, limit: int | None = None) -> str:
-    value = collapse_whitespace(title or "")
-    if not value:
-        return fallback
-    return truncate(value, limit) if limit else value
+#: The code inside a title, e.g. ``FC2-PPV-5007844`` / ``FC2_5007844`` / ``FC2 5007844``.
+#: Copied from the user's old project: case-insensitive, tolerant separators and
+#: leading zeros, because the code is already printed bold on the first line.
+_CODE_IN_TITLE_TEMPLATE = r"(?i)fc2[\s._-]*(?:ppv)?[\s._-]*0*{number}"
+#: Torrent titles are often prefixed with ``+++``.
+_LEADING_PLUS_RE = re.compile(r"^\s*\+{2,}\s*")
+
+
+def clean_card_title(card: CardSource, *, limit: int | None = None) -> str:
+    """The title without the repeated FC2 code, falling back to the code itself."""
+
+    text = collapse_whitespace(card.title or "")
+    text = _LEADING_PLUS_RE.sub("", text)
+    number = (card.canonical_key or "").split(":")[-1]
+    if number.isdigit():
+        text = re.sub(_CODE_IN_TITLE_TEMPLATE.format(number=number), "", text)
+    text = " ".join(text.split()).strip(" -_.")
+    if not text:
+        return card.display_code
+    return truncate(text, limit) if limit else text
 
 
 def clean_description(text: str | None, *, limit: int | None = None) -> str | None:
@@ -167,18 +182,14 @@ def format_published_at(value: datetime | None, timezone: str = "Asia/Shanghai")
     return value.astimezone(zone).strftime(TIME_FORMAT)
 
 
-def meta_line(card: CardSource) -> str | None:
-    """``💾 size · 🕒 time``, dropping whichever half the release does not have."""
+def meta_line(card: CardSource) -> str:
+    """``💾 size · 🕒 time``; a missing size shows ``-``, as the old system did."""
 
-    size = collapse_whitespace(card.size_text or "")
+    size = collapse_whitespace(card.size_text or "") or "-"
     published = format_published_at(card.published_at, card.timezone)
-    if size and published:
-        return META_LINE_TEMPLATE.format(size=escape_html(size), published=published)
-    if size:
-        return META_SIZE_ONLY_TEMPLATE.format(size=escape_html(size))
     if published:
-        return META_TIME_ONLY_TEMPLATE.format(published=published)
-    return None
+        return META_LINE_TEMPLATE.format(size=escape_html(size), published=published)
+    return META_SIZE_ONLY_TEMPLATE.format(size=escape_html(size))
 
 
 def identity_block(card: CardSource, *, truncated: bool = False) -> str:
@@ -187,10 +198,8 @@ def identity_block(card: CardSource, *, truncated: bool = False) -> str:
     lines = [CODE_LINE_TEMPLATE.format(code=escape_html(card.display_code))]
     lines.append(TAG_LINE_TEMPLATE.format(label=censorship_label(card.censorship)))
     limit = CARD_TITLE_MAX if truncated else None
-    title = escape_html(clean_title(card.title, card.display_code, limit=limit))
-    meta = meta_line(card)
-    block = f"{title}\n{meta}" if meta else title
-    return f"{chr(10).join(lines)}\n\n{block}"
+    title = escape_html(clean_card_title(card, limit=limit))
+    return f"{chr(10).join(lines)}\n\n{title}\n{meta_line(card)}"
 
 
 def link_line(card: CardSource) -> str | None:
@@ -209,12 +218,9 @@ def compact_caption(card: CardSource) -> str:
     """
 
     blocks = [identity_block(card, truncated=True)]
-    description = clean_description(card.description_ja, limit=CARD_DESCRIPTION_MAX)
+    description = clean_description(card_text(card), limit=CARD_DESCRIPTION_MAX)
     if description:
         blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
-    translation = clean_description(card.description_zh, limit=CARD_DESCRIPTION_MAX)
-    if translation:
-        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
 
     link = link_line(card)
     caption = "\n\n".join(blocks)
@@ -229,24 +235,26 @@ def compact_caption(card: CardSource) -> str:
     return f"{caption}\n{link}" if link else caption
 
 
-def description_messages(card: CardSource) -> tuple[str, ...]:
-    """The **complete** description and translation as separate, escaped messages.
+def card_text(card: CardSource) -> str | None:
+    """What the ``📝`` line shows: the Chinese translation, else the Japanese text.
 
-    Nothing is truncated here: this is the path that runs when the card did not
-    fit, and spec 9.1 forbids losing body text.
+    The old system printed one block, never both, which keeps the card short.
     """
 
-    blocks: list[str] = []
-    description = clean_description(card.description_ja)
-    if description:
-        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
-    translation = clean_description(card.description_zh)
-    if translation:
-        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
-    messages: list[str] = []
-    for block in blocks:
-        messages.extend(split_text(block))
-    return tuple(messages)
+    return card.description_zh or card.description_ja
+
+
+def description_messages(card: CardSource) -> tuple[str, ...]:
+    """The **complete** body as follow-up messages when the card does not fit.
+
+    Nothing is truncated here: spec 9.1 forbids losing body text, so the caption's
+    preview is only a preview.
+    """
+
+    description = clean_description(card_text(card))
+    if not description:
+        return ()
+    return tuple(split_text(f"{DESCRIPTION_PREFIX}{escape_html(description)}"))
 
 
 def build_card_messages(card: CardSource) -> CardMessages:
@@ -273,14 +281,11 @@ def build_card_messages(card: CardSource) -> CardMessages:
       text is lost: the preview only ever duplicates what is sent in full.
     """
 
-    description = clean_description(card.description_ja)
-    translation = clean_description(card.description_zh)
+    description = clean_description(card_text(card))
 
     blocks = [identity_block(card)]
     if description:
         blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
-    if translation:
-        blocks.append(f"{ZH_PREFIX}{escape_html(translation)}")
 
     link = link_line(card)
     body = "\n\n".join(blocks)
