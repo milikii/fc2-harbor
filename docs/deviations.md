@@ -483,3 +483,14 @@
 - 日志：`image.viewer_page_detected`、`image.viewer_candidate {url, source, reason_rejected}`（每个被跳过的候选都记一条，能看出为什么选了这张）、`image.viewer_resolved {url, width, height, bytes}`、`image.viewer_unresolved {reason}`。
 - 只在 **Nyaa fallback** 的图片上启用（`provider == "Nyaa"`）；provider 自己的封面不做二次解析，避免把正常图片误当查看页。
 - 实测（经代理）：`https://kr-av.com/upload/…-FC2-PPV-5007946.jpg` 解析出真实图片 `700x700 / 154KB / image/jpeg`。
+
+## 56. 标签默认「有码」改为无条件（页面抓不到也一样）
+
+- 背景：§52 的默认有码只在「官网页面抓取成功」时生效，页面失败仍留 `unknown`；而 torrentmate 的 `_censor_label(tags)` 是无条件的——没有 tags 也返回「有码」，所以旧系统里用户永远看不到「未知」。
+- 实现：
+  - `censorship_from_tags(..., page_available=)` 的默认分支不再受页面状态限制，只影响 `censorship_evidence.reason`：页面成功但无码制标签 → `no_official_tag`；页面没抓到 → `page_unavailable`；
+  - 协调器在聚合结束时补同样的默认（`metadata.censorship_default {reason: page_unavailable}`），**仅对 `content_type=fc2`**——generic 资源不是 FC2 商品，不能用这条规则贴标签；
+  - **唯一保留 `unknown` 的情况**：provider 之间明确冲突（一个说无码一个说有码），`sources["censorship"]` 记 `conflict:…`，此时不再默认；
+  - 页面 404/下架仍然是 `not_found`（抓取状态），标签另按默认有码处理；
+  - `scripts/recensor.py` 同步：没有 provider 记录、抓取失败的 FC2 行也走「标题 → 默认有码」，报告里 `evidence_source=default`。
+- 预期：现存的 `unknown` FC2 内容会全部变成「有码」（标题带 `【無】` 的除外）。

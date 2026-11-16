@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Literal
 
 from app.config import Settings
-from app.db.enums import Censorship
+from app.db.enums import Censorship, ContentType
 from app.db.models import Content
 from app.logging import error_detail, get_logger
 from app.network.clients import HttpClient
@@ -203,9 +203,24 @@ class MetadataCoordinator:
                 "release_title": ctx.release_title,
             }
         )
-        if inferred is None:
+        if aggregated.censorship is not Censorship.UNKNOWN:
+            if inferred is not None and aggregated.censorship is not inferred:
+                # Never override an explicit provider value; just record the
+                # disagreement.
+                _log.warning(
+                    "metadata.censorship_conflict",
+                    canonical_key=content.canonical_key,
+                    provider_value=aggregated.censorship.value,
+                    title_value=inferred.value,
+                    source=aggregated.sources.get("censorship"),
+                )
             return
-        if aggregated.censorship is Censorship.UNKNOWN:
+
+        if "censorship" in aggregated.sources:
+            # A provider explicitly said "unknown" (a real conflict): leave it.
+            return
+
+        if inferred is not None:
             aggregated.censorship = inferred
             aggregated.sources["censorship"] = "title_fallback"
             _log.info(
@@ -215,15 +230,21 @@ class MetadataCoordinator:
                 evidence=evidence,
             )
             return
-        if aggregated.censorship is not inferred:
-            # Never override an explicit provider value; just record the disagreement.
-            _log.warning(
-                "metadata.censorship_conflict",
-                canonical_key=content.canonical_key,
-                provider_value=aggregated.censorship.value,
-                title_value=inferred.value,
-                source=aggregated.sources.get("censorship"),
-            )
+
+        # No provider value and no title evidence: the page was unavailable. FC2
+        # products are censored by default — the old system never showed "unknown".
+        # Only for FC2 content: a generic torrent is not an FC2 product and must not
+        # be labelled by a rule that does not apply to it.
+        if content.content_type is not ContentType.FC2:
+            return
+        aggregated.censorship = Censorship.CENSORED
+        aggregated.sources["censorship"] = "default"
+        _log.info(
+            "metadata.censorship_default",
+            canonical_key=content.canonical_key,
+            reason="page_unavailable",
+        )
+
 
     def _description_is_good_enough(self, aggregated: AggregatedMetadata) -> bool:
         """Early stop is only allowed once the description is not just a teaser."""

@@ -129,9 +129,19 @@ def _official_tags(html_text: str) -> list[str]:
 
 
 def censorship_from_tags(
-    tags: list[str], title: str | None, release_title: str | None
+    tags: list[str],
+    title: str | None,
+    release_title: str | None,
+    *,
+    page_available: bool = True,
 ) -> tuple[Censorship, dict[str, object]]:
-    """Official tags → bracketed title forms → "censored" as the FC2 default."""
+    """Official tags → bracketed title forms → "censored" as the FC2 default.
+
+    The default is unconditional (torrentmate rule): FC2 products are censored unless
+    the official tags say otherwise, so a page that could not be fetched still yields
+    "censored" — only the ``reason`` in the evidence differs. The user never sees
+    "unknown" in the old system, and asked for the same behaviour here.
+    """
 
     tag_text = " ".join(tags)
     if "無修正" in tag_text:
@@ -147,7 +157,7 @@ def censorship_from_tags(
     return Censorship.CENSORED, {
         "source": "default",
         "tags": tags,
-        "reason": "FC2 products are censored unless the official tags say otherwise",
+        "reason": "no_official_tag" if page_available else "page_unavailable",
     }
 
 

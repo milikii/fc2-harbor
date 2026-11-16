@@ -740,6 +740,8 @@ def test_fc2_without_a_censor_tag_defaults_to_censored() -> None:
     assert result is not None
     assert result.censorship is Censorship.CENSORED
     assert result.raw["censorship_evidence"]["source"] == "default"
+    # The page *was* fetched; there simply is no censor tag.
+    assert result.raw["censorship_evidence"]["reason"] == "no_official_tag"
     assert result.raw["tags"] == ["顔射", "ごっくん"]
 
 
@@ -774,8 +776,8 @@ def test_fc2_tags_are_deduplicated_and_entity_decoded() -> None:
     assert result.raw["tags"] == ["顔射", "中出し&顔射"]
 
 
-async def test_fc2_removed_page_keeps_unknown() -> None:
-    """A 404 never reaches parse, so no default tag is invented."""
+async def test_fc2_removed_page_is_not_found() -> None:
+    """A 404 is a fetch status, not a tag verdict; the coordinator defaults it."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, text="<html>not found</html>")
@@ -786,3 +788,25 @@ async def test_fc2_removed_page_keeps_unknown() -> None:
         await adapter.fetch(make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"))
     assert excinfo.value.code == "not_found"
     await client.aclose()
+
+
+def test_censorship_default_reason_distinguishes_page_states() -> None:
+    from app.providers.fc2 import censorship_from_tags
+
+    available, evidence_ok = censorship_from_tags([], None, None, page_available=True)
+    unavailable, evidence_gone = censorship_from_tags([], None, None, page_available=False)
+
+    assert available is Censorship.CENSORED
+    assert evidence_ok["source"] == "default" and evidence_ok["reason"] == "no_official_tag"
+    assert unavailable is Censorship.CENSORED
+    assert evidence_gone["reason"] == "page_unavailable"
+
+
+def test_censorship_title_wins_even_when_the_page_is_unavailable() -> None:
+    from app.providers.fc2 import censorship_from_tags
+
+    verdict, evidence = censorship_from_tags(
+        [], "FC2-PPV-1234567 【無】作品", None, page_available=False
+    )
+    assert verdict is Censorship.UNCENSORED
+    assert evidence["source"] == "title"

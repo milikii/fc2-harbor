@@ -31,10 +31,11 @@ async def seed(
     release_title: str | None = None,
     censorship: Censorship = Censorship.UNKNOWN,
     provider_raw: dict[str, object] | None = None,
+    content_type: ContentType = ContentType.FC2,
 ) -> str:
     async with db.transaction() as session:
         content = Content(
-            content_type=ContentType.FC2,
+            content_type=content_type,
             canonical_key=key,
             display_code="FC2-PPV-1234567",
             title_ja=title,
@@ -167,16 +168,18 @@ async def test_evidence_is_merged_into_the_existing_raw(db: Database) -> None:
     assert raw["censorship_evidence"]["matches"][0]["token"] == "【薄】"
 
 
-async def test_no_evidence_leaves_unknown_and_is_counted(db: Database) -> None:
+async def test_no_evidence_defaults_to_censored_for_fc2(db: Database) -> None:
+    """The old system never showed "unknown": no evidence means "censored"."""
+
     content_id = await seed(db, title="素人作品", description="説明文です。")
     report = RecensorReport(dry_run=False)
 
     async with db.transaction() as session:
         await recensor(session, force=False, report=report)
 
-    assert report.changed == 0
-    assert report.no_evidence == 1
-    assert await tag_of(db, content_id) is Censorship.UNKNOWN
+    assert report.changed == 1
+    assert await tag_of(db, content_id) is Censorship.CENSORED
+    assert report.changes[0]["evidence_source"] == "default"
 
 
 async def test_dry_run_reports_changes_but_writes_nothing(db: Database) -> None:
@@ -205,7 +208,8 @@ async def test_report_distribution_uses_the_chinese_labels(db: Database) -> None
 
     distribution = report.as_dict()["distribution"]
     assert distribution["before"] == {"有码": 0, "无码": 0, "薄码": 0, "未知": 3}
-    assert distribution["after"] == {"有码": 1, "无码": 1, "薄码": 0, "未知": 1}
+    # 素人作品 has no evidence at all → the FC2 default is "censored".
+    assert distribution["after"] == {"有码": 2, "无码": 1, "薄码": 0, "未知": 0}
 
 
 def test_report_file_is_json_serialisable(tmp_path: Path) -> None:
@@ -220,7 +224,9 @@ def test_report_file_is_json_serialisable(tmp_path: Path) -> None:
 async def test_generic_content_without_any_wording_is_untouched(
     db: Database, force: bool
 ) -> None:
-    content_id = await seed(db, "infohash:" + "a" * 40, title="Some Torrent")
+    content_id = await seed(
+        db, "infohash:" + "a" * 40, title="Some Torrent", content_type=ContentType.GENERIC
+    )
     report = RecensorReport(dry_run=False)
 
     async with db.transaction() as session:
@@ -360,7 +366,7 @@ async def test_a_fetched_page_without_censor_tags_defaults_to_censored(
     assert await tag_of(db, content_id) is Censorship.CENSORED
 
 
-async def test_without_a_successful_fetch_only_titles_decide(db: Database) -> None:
+async def test_without_a_successful_fetch_titles_then_default(db: Database) -> None:
     with_title = await seed(db, "fc2_ppv:1", title="【無】作品")
     no_evidence = await seed(db, "fc2_ppv:2", title="作品")
     report = RecensorReport(dry_run=False)
@@ -369,16 +375,23 @@ async def test_without_a_successful_fetch_only_titles_decide(db: Database) -> No
         await recensor(session, force=False, report=report)
 
     assert await tag_of(db, with_title) is Censorship.UNCENSORED
-    # Never guessed: no page, no title evidence.
-    assert await tag_of(db, no_evidence) is Censorship.UNKNOWN
+    # No page, no title evidence → the FC2 default, with the reason recorded.
+    assert await tag_of(db, no_evidence) is Censorship.CENSORED
+    default = next(
+        item for item in report.changes if item["canonical_key"] == "fc2_ppv:2"
+    )
+    assert default["evidence_source"] == "default"
 
 
-async def test_failed_fc2_result_does_not_trigger_the_default(db: Database) -> None:
+async def test_a_failed_fetch_still_defaults_to_censored(db: Database) -> None:
+    """The verdict is the same; only the evidence reason changes."""
+
     content_id = await seed_with_fc2_result(db, success=False, title="作品")
     report = RecensorReport(dry_run=False)
 
     async with db.transaction() as session:
         await recensor(session, force=False, report=report)
 
-    assert report.changed == 0
-    assert await tag_of(db, content_id) is Censorship.UNKNOWN
+    assert report.changed == 1
+    assert await tag_of(db, content_id) is Censorship.CENSORED
+    assert report.changes[0]["evidence_source"] == "default"

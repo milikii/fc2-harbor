@@ -523,11 +523,40 @@ async def test_provider_value_wins_over_the_title(tmp_path: Path) -> None:
     assert aggregated.sources["censorship"] == "A"
 
 
-async def test_no_evidence_anywhere_stays_unknown(tmp_path: Path) -> None:
+async def test_no_evidence_anywhere_defaults_to_censored(tmp_path: Path) -> None:
+    """The old system never showed "unknown": FC2 defaults to censored."""
+
     a = FakeProvider("A", result=result("A", title="FC2-PPV-1234567 作品"))
     aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
         make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
     )
 
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "default"
+
+
+async def test_generic_content_is_not_forced_to_censored(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="Some Torrent"))
+    generic = Content(
+        content_type=ContentType.GENERIC,
+        canonical_key="infohash:" + "a" * 40,
+    )
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        generic, ProviderContext(canonical_key=generic.canonical_key), min_previews=0
+    )
+
     assert aggregated.censorship is Censorship.UNKNOWN
-    assert "censorship" not in aggregated.sources
+
+
+async def test_provider_conflict_stays_unknown(tmp_path: Path) -> None:
+    """Two providers contradicting each other is a real conflict, not a gap."""
+
+    a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNCENSORED))
+    b = FakeProvider("B", result=result("B", title="作品", censorship=Censorship.CENSORED))
+
+    aggregated = await coordinator(a, b, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.sources["censorship"].startswith("conflict:")

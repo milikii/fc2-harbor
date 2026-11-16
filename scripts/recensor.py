@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings
-from app.db.enums import Censorship
+from app.db.enums import Censorship, ContentType
 from app.db.models import Content, ProviderResult, Release
 from app.db.session import Database, migrate_async
 from app.providers.base import infer_censorship
@@ -125,17 +125,21 @@ async def recensor(
 
         release_titles = await _release_titles(session, content.id)
         tags, fc2_fetched = await _fc2_state(session, content.id)
-        if fc2_fetched:
-            # The official page was fetched once, so the "censored by default" rule
-            # applies exactly as it does in the provider (docs/deviations.md §52).
-            verdict, evidence = censorship_from_tags(
-                tags, content.title_ja, release_titles
-            )
-        else:
-            # No successful official fetch: only explicit wording in the titles.
-            # The seller description never decides the tag.
+        # Same rule as the provider: official tags → title brackets → censored by
+        # default. ``page_available`` only changes the recorded reason, never the
+        # verdict — the old system never showed "unknown" (deviation §56).
+        if content.content_type is not ContentType.FC2:
+            # The "censored by default" rule describes FC2 products; a generic
+            # torrent must not be labelled by it.
             verdict, evidence = infer_censorship(
                 {"title": content.title_ja, "release_title": release_titles}
+            )
+        else:
+            verdict, evidence = censorship_from_tags(
+                tags,
+                content.title_ja,
+                release_titles,
+                page_available=fc2_fetched,
             )
 
         if verdict is None:
