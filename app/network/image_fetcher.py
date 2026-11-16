@@ -77,6 +77,56 @@ class FetchedImage:
     cdn_host: str
 
 
+#: Image extensions accepted from a viewer page's links.
+_VIEWER_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def image_url_from_viewer(html_text: str, base_url: str) -> str | None:
+    """The most likely real image URL inside an HTML viewer page.
+
+    Order: ``og:image`` → ``twitter:image`` → the largest ``<img>`` (explicit
+    width/height wins, then a class/id that looks like the main picture) → the first
+    link pointing at an image file. No guessing beyond that: ``None`` means "give up".
+    """
+
+    from selectolax.lexbor import LexborHTMLParser
+
+    tree = LexborHTMLParser(html_text or "")
+
+    for selector in ('meta[property="og:image"]', 'meta[name="twitter:image"]'):
+        node = tree.css_first(selector)
+        if node is not None:
+            content = (node.attributes.get("content") or "").strip()
+            if content:
+                return urljoin(base_url, content)
+
+    best: tuple[int, str] | None = None
+    for node in tree.css("img"):
+        source = (node.attributes.get("src") or node.attributes.get("data-src") or "").strip()
+        if not source or source.startswith("data:"):
+            continue
+        try:
+            area = int(node.attributes.get("width") or 0) * int(
+                node.attributes.get("height") or 0
+            )
+        except (TypeError, ValueError):
+            area = 0
+        hint = f"{node.attributes.get('class') or ''} {node.attributes.get('id') or ''}".lower()
+        if any(word in hint for word in ("image", "photo", "main")):
+            area += 1_000_000  # a labelled main picture beats an unlabelled one
+        if best is None or area > best[0]:
+            best = (area, source)
+    if best is not None:
+        return urljoin(base_url, best[1])
+
+    for node in tree.css("a[href]"):
+        href = (node.attributes.get("href") or "").strip()
+        lowered = href.lower().split("?")[0]
+        if lowered.endswith(_VIEWER_IMAGE_SUFFIXES):
+            return urljoin(base_url, href)
+    return None
+
+
 def is_public_ip(value: str) -> bool:
     try:
         address = ipaddress.ip_address(value)
@@ -204,16 +254,80 @@ class ImageFetcher:
         *,
         proxy_url: str | None = None,
         referer: str | None = None,
+        resolve_viewer: bool = False,
+    ) -> FetchedImage:
+        """Download one image.
+
+        ``resolve_viewer`` allows exactly **one** level of indirection: some image
+        hosts answer with an HTML "viewer" page instead of the file. When enabled,
+        that page is parsed for the real image URL, which then goes through the whole
+        validation pipeline again (IP, size, content type, decoding).
+        """
+
+        return await self._fetch(
+            url,
+            proxy_url=proxy_url,
+            referer=referer,
+            resolve_viewer=resolve_viewer,
+            depth=0,
+        )
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        proxy_url: str | None,
+        referer: str | None,
+        resolve_viewer: bool,
+        depth: int,
     ) -> FetchedImage:
         current = url
         headers = {"Referer": referer} if referer else {}
         for _hop in range(self.max_redirects + 1):
             self.ensure_allowed(current)
-            body, content_type, final_url = await self._download(current, headers, proxy_url)
+            body, content_type, final_url = await self._download(
+                current, headers, proxy_url, allow_html=resolve_viewer
+            )
             if body is None:  # redirect
                 location = content_type
                 current = urljoin(current, location)
                 continue
+            if content_type == "text/html":
+                if not resolve_viewer or depth >= 1:
+                    _log.warning(
+                        "image.viewer_unresolved",
+                        domain=urlsplit(final_url).hostname,
+                        reason="nested_or_disabled",
+                        depth=depth,
+                    )
+                    raise ImageFetchError(
+                        "bad_content_type", "image url served an HTML viewer page"
+                    )
+                _log.info(
+                    "image.viewer_page_detected",
+                    domain=urlsplit(final_url).hostname,
+                    bytes=len(body),
+                )
+                target = image_url_from_viewer(
+                    body.decode("utf-8", "replace"), final_url
+                )
+                if not target:
+                    _log.warning(
+                        "image.viewer_unresolved",
+                        domain=urlsplit(final_url).hostname,
+                        reason="no_image_found",
+                    )
+                    raise ImageFetchError(
+                        "bad_content_type", "viewer page had no image URL"
+                    )
+                _log.info("image.viewer_resolved", found_url=target)
+                return await self._fetch(
+                    target,
+                    proxy_url=proxy_url,
+                    referer=final_url,
+                    resolve_viewer=False,
+                    depth=depth + 1,
+                )
             return self._validate_and_store(
                 requested=url,
                 final_url=final_url,
@@ -227,6 +341,8 @@ class ImageFetcher:
         url: str,
         headers: Mapping[str, str],
         proxy_url: str | None,
+        *,
+        allow_html: bool = False,
     ) -> tuple[bytes | None, str, str]:
         started = time.monotonic()
         client = self._client_for(proxy_url)
@@ -245,7 +361,10 @@ class ImageFetcher:
                 content_type = (
                     (response.headers.get("content-type") or "").split(";")[0].strip().lower()
                 )
-                if content_type not in ALLOWED_CONTENT_TYPES:
+                if allow_html and content_type == "text/html":
+                    # A viewer page: read it so the caller can find the real image.
+                    pass
+                elif content_type not in ALLOWED_CONTENT_TYPES:
                     _log.warning(
                         "image.rejected_content_type",
                         domain=urlsplit(url).hostname,

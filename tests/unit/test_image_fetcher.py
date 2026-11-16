@@ -384,3 +384,192 @@ async def test_loose_mode_still_rejects_a_spoofed_non_image(tmp_path: Path) -> N
     finally:
         await fetcher.aclose()
     assert excinfo.value.code == "not_an_image"
+
+
+# -- HTML "viewer" pages: resolve one level, then re-validate ------------------
+
+
+VIEWER_HTML = """
+<html><head><meta property="og:image" content="/media/real.jpg"></head>
+<body><img src="/thumb.jpg" width="100" height="100"></body></html>
+"""
+
+
+async def test_viewer_page_resolves_og_image(tmp_path: Path) -> None:
+    body = png_bytes()
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.path == "/page":
+            return httpx.Response(
+                200, content=VIEWER_HTML, headers={"content-type": "text/html"}
+            )
+        return httpx.Response(200, content=body, headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        image = await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    assert image.cdn_host == "img.example.com"
+    assert image.size_bytes == len(body)
+    assert requested == [
+        "https://img.example.com/page",
+        "https://img.example.com/media/real.jpg",
+    ]
+
+
+async def test_viewer_page_picks_the_largest_img(tmp_path: Path) -> None:
+    html_page = """
+    <html><body>
+      <img src="/small.jpg" width="10" height="10">
+      <img src="/big.jpg" width="800" height="600">
+      <img src="/medium.jpg" width="300" height="200">
+    </body></html>
+    """
+    body = png_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=body, headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        image = await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+    assert image.final_url == "https://img.example.com/big.jpg"
+
+
+async def test_viewer_page_without_images_gives_up(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content="<html><body>no pictures</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with pytest.raises(ImageFetchError) as excinfo:
+            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+    assert excinfo.value.code == "bad_content_type"
+
+
+async def test_viewer_resolution_to_a_private_address_is_rejected(tmp_path: Path) -> None:
+    html_page = '<html><head><meta property="og:image" content="https://internal.example.net/x.jpg"></head></html>'
+    resolved = {
+        "img.example.com": [PUBLIC_IP],
+        "internal.example.net": ["10.0.0.5"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+
+    fetcher = make_fetcher(
+        tmp_path, handler, resolver=lambda host: resolved.get(host, [PUBLIC_IP])
+    )
+    try:
+        with pytest.raises(ImageFetchError) as excinfo:
+            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+    assert excinfo.value.code == "ssrf_blocked"
+
+
+async def test_viewer_resolution_follows_only_one_level(tmp_path: Path) -> None:
+    """A second HTML page is not parsed again — no recursion."""
+
+    nested = '<html><head><meta property="og:image" content="/deeper.jpg"></head></html>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=nested, headers={"content-type": "text/html"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with pytest.raises(ImageFetchError) as excinfo:
+            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+    assert excinfo.value.code == "bad_content_type"
+
+
+async def test_viewer_resolution_is_off_by_default(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        return httpx.Response(200, content=VIEWER_HTML, headers={"content-type": "text/html"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with pytest.raises(ImageFetchError) as excinfo:
+            await fetcher.fetch("https://img.example.com/page")
+    finally:
+        await fetcher.aclose()
+    assert excinfo.value.code == "bad_content_type"
+
+
+async def test_resolved_image_still_must_be_a_real_image(tmp_path: Path) -> None:
+    html_page = '<html><head><meta property="og:image" content="/fake.png"></head></html>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=b"not an image", headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with pytest.raises(ImageFetchError) as excinfo:
+            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+    assert excinfo.value.code == "not_an_image"
+
+
+async def test_viewer_logs_are_emitted(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    body = png_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=VIEWER_HTML, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=body, headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with capture_logs() as logs:
+            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    events = [entry["event"] for entry in logs]
+    assert "image.viewer_page_detected" in events
+    assert "image.viewer_resolved" in events
+
+
+def test_viewer_parser_prefers_og_image_over_links() -> None:
+    from app.network.image_fetcher import image_url_from_viewer
+
+    html_page = (
+        '<html><head><meta property="og:image" content="https://cdn.example/og.jpg"></head>'
+        '<body><a href="/other.png">x</a></body></html>'
+    )
+    assert image_url_from_viewer(html_page, "https://viewer.example/p/1") == "https://cdn.example/og.jpg"
+
+
+def test_viewer_parser_uses_twitter_image() -> None:
+    from app.network.image_fetcher import image_url_from_viewer
+
+    html_page = '<html><head><meta name="twitter:image" content="/tw.jpg"></head></html>'
+    assert image_url_from_viewer(html_page, "https://viewer.example/p/1") == "https://viewer.example/tw.jpg"
+
+
+def test_viewer_parser_falls_back_to_image_links() -> None:
+    from app.network.image_fetcher import image_url_from_viewer
+
+    html_page = '<html><body><a href="/photo/full.png">full size</a></body></html>'
+    assert image_url_from_viewer(html_page, "https://viewer.example/p/1") == "https://viewer.example/photo/full.png"

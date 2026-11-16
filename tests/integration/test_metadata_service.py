@@ -17,7 +17,7 @@ from app.config import CANONICAL_FC2_PROVIDER_ORDER, Settings
 from app.db.enums import AssetRole, Censorship, ContentType, MetadataStatus
 from app.db.models import Asset, Content, ProviderResult, Release
 from app.db.session import Database
-from app.network.image_fetcher import ImageFetcher
+from app.network.image_fetcher import ImageFetcher, ImageFetchError
 from app.network.proxy import ProxyRouter
 from app.providers.base import BaseProvider, ProviderError, ProviderPage
 from app.providers.coordinator import MetadataCoordinator
@@ -506,3 +506,39 @@ async def test_fallback_description_reaches_the_translator(
     translated = await service._translate(content_id, "フォールバックの説明")
     assert translator.calls == ["フォールバックの説明"]
     assert translated == "回退译文"
+
+
+# -- viewer-page resolution is enabled only for the Nyaa fallback --------------
+
+
+class _RecordingFetcher:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def fetch(self, url: str, **kwargs: object) -> object:
+        self.calls.append({"url": url, **kwargs})
+        raise ImageFetchError("bad_content_type", "stop here")
+
+
+async def test_viewer_resolution_is_only_enabled_for_nyaa_images(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    service = build_service(db, settings, tmp_path)
+    recorder = _RecordingFetcher()
+    service.fetcher = recorder  # type: ignore[assignment]
+
+    for provider in ("Nyaa", "Fc2"):
+        await service._store_one(
+            content_id,
+            f"https://cdn.example.com/{provider}.jpg",
+            provider,
+            AssetRole.PREVIEW,
+            0,
+            None,
+            set(),
+        )
+
+    assert recorder.calls[0]["resolve_viewer"] is True
+    assert recorder.calls[1]["resolve_viewer"] is False

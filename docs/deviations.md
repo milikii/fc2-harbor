@@ -469,3 +469,15 @@
 - 校验顺序调整：字面量私网 IP 在**域名白名单之前**判定，这样 `https://127.0.0.1/…` 报 `ssrf_blocked` 而不是 `host_not_allowed`，排查时更准确。
 - 实测：`picsum.photos`、`httpbin.org/image/png`（都不在白名单）经代理抓取、解码、落盘成功。
 - 已知遗留：`kr-av.com/upload/…jpg` 这类链接返回的是 **HTML 图片查看页**（`text/html`，29KB），不是图片本身——现在会明确报 `bad_content_type` 而不是静默失败，但这类图床还需要「解析查看页找真实图片 URL」的能力，属于后续工作。
+
+## 55. HTML「查看页」解析：通用做法，不按图床写适配器
+
+- 问题：`kr-av.com/upload/…jpg` 这类链接返回的是 HTML 查看页（`text/html`），图片本体在页面里，直接抓只能拿到网页。
+- 实现（`app/network/image_fetcher.py`）：
+  - `fetch(..., resolve_viewer=…)`：遇到 `Content-Type: text/html` 且允许解析时，把 HTML 交给 `image_url_from_viewer()`；
+  - 候选顺序：`meta[property="og:image"]` → `meta[name="twitter:image"]` → `<img>` 中"最大"的一张（显式 `width*height` 优先，class/id 含 `image`/`photo`/`main` 加权）→ `<a href>` 指向 `.jpg/.jpeg/.png/.webp/.gif`；
+  - 找到后**重新走完整抓取流程**（IP 校验、大小、Content-Type、Pillow 解码），不是绕过；
+  - **最多跟一层**：解析出的地址若仍是 HTML，记 `image.viewer_unresolved` 并放弃，不递归。
+- 日志：`image.viewer_page_detected`、`image.viewer_resolved {found_url}`、`image.viewer_unresolved {reason}`。
+- 只在 **Nyaa fallback** 的图片上启用（`provider == "Nyaa"`）；provider 自己的封面不做二次解析，避免把正常图片误当查看页。
+- 实测（经代理）：`https://kr-av.com/upload/…-FC2-PPV-5007946.jpg` 解析出真实图片 `700x700 / 154KB / image/jpeg`。

@@ -374,6 +374,7 @@ docker compose run --rm app python scripts/import_legacy.py \
 | `content_path_unmapped` | `storage.path_mappings` 没覆盖 qB 报的路径，补映射 |
 | provider 全 `error` | 代理不通或站点 403；看 `/providers` 与 `metrics.proxies` |
 | `structure` 计数上涨 | 站点改版，按 `docs/deviations.md` §19 的流程补 fixture + 改 selector |
+| 封面图一直抓不到，日志有 `image.viewer_unresolved` | 图床返回的是查看页且解析不出真图。属于该图床的限制，卡片会继续等封面（`cover_status=pending_cover`），重试超限后 `give_up` |
 | 某编号一直不推卡片 | 查 `contents.cover_status`：`pending_cover` 表示在等封面（重试中），`give_up` 表示重试 `publisher.cover_retry_limit` 轮后放弃（多半是官网页面已下架或抓不到封面）。把该行 `cover_status` 改回 `pending`、`cover_retry_count=0` 可让它重新入队 |
 | 卡片里没有 `🇨🇳` 译文 | 看 `metadata.translate_failed` 的 `error_code`：`non_json` 说明出口被 Google 拦（返回 HTML「Sorry...」页，换出口）；`network` 是代理不通；`length_mismatch`/`bad_response` 是端点换了格式。卡片本身不受影响 |
 | 卡片发出去但 Telegram 报 `can't parse entities` | 只可能来自我们自己拼的 HTML：检查是不是有人改了 `app/services/cards.py` 却没走 `escape_html()`；测试 `test_markup_in_content_is_escaped_before_sending` 会挡住这种回归 |

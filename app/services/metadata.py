@@ -104,6 +104,10 @@ def derive_image_allowlist(settings: Settings) -> list[str]:
     return sorted(host for host in hosts if host)
 
 
+#: Provider id of the Nyaa page fallback (``app/providers/nyaa_fallback.py``).
+NYAA_FALLBACK_PROVIDER = "Nyaa"
+
+
 class MetadataService:
     def __init__(
         self,
@@ -290,7 +294,13 @@ class MetadataService:
         )
         try:
             image: FetchedImage = await self.fetcher.fetch(
-                url, proxy_url=proxy.url, referer=referer
+                url,
+                proxy_url=proxy.url,
+                referer=referer,
+                # Only the Nyaa fallback produces third-party image hosts that answer
+                # with an HTML viewer page; a provider's own cover must not be
+                # re-interpreted (deviation §55).
+                resolve_viewer=provider == NYAA_FALLBACK_PROVIDER,
             )
         except ImageFetchError as exc:
             if self.metrics is not None:
