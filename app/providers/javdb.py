@@ -22,6 +22,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import quote
 
+from app.db.enums import Censorship
 from app.db.models import Content
 from app.providers.base import (
     BaseProvider,
@@ -131,6 +132,9 @@ class JavdbProvider(BaseProvider):
             # The title carries the ``【無】/【有】/【薄】`` marker; javdb is not the
             # official site, so only explicit brackets count (never a default).
             censorship, censorship_evidence = infer_censorship({"title": title})
+            if censorship is Censorship.UNKNOWN:
+                # A conflicting title is not an opinion; the coordinator decides.
+                censorship = None
             return self._result(
                 content,
                 title=title,

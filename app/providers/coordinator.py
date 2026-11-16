@@ -203,6 +203,7 @@ class MetadataCoordinator:
                 "release_title": ctx.release_title,
             }
         )
+        source = aggregated.sources.get("censorship", "")
         if aggregated.censorship is not Censorship.UNKNOWN:
             if inferred is not None and aggregated.censorship is not inferred:
                 # Never override an explicit provider value; just record the
@@ -212,20 +213,48 @@ class MetadataCoordinator:
                     canonical_key=content.canonical_key,
                     provider_value=aggregated.censorship.value,
                     title_value=inferred.value,
-                    source=aggregated.sources.get("censorship"),
+                    source=source,
                 )
+            _log.info(
+                "metadata.censorship_resolved",
+                canonical_key=content.canonical_key,
+                reason="conflict" if source.startswith("conflict:") else "provider_value",
+                censorship=aggregated.censorship.value,
+                source=source,
+            )
             return
 
-        if "censorship" in aggregated.sources:
-            # A provider explicitly said "unknown" (a real conflict): leave it.
+        if source.startswith("conflict:"):
+            # Two providers disagree: that is a real conflict, not a missing value.
+            _log.info(
+                "metadata.censorship_resolved",
+                canonical_key=content.canonical_key,
+                reason="conflict",
+                censorship=Censorship.UNKNOWN.value,
+                source=source,
+            )
+            return
+
+        if inferred is Censorship.UNKNOWN:
+            # The titles themselves contradict each other (【無】 in one, 【有】 in the
+            # other): a real conflict, not a missing value.
+            aggregated.sources["censorship"] = "conflict:title,release_title"
+            _log.info(
+                "metadata.censorship_resolved",
+                canonical_key=content.canonical_key,
+                reason="conflict",
+                censorship=Censorship.UNKNOWN.value,
+                evidence=evidence,
+            )
             return
 
         if inferred is not None:
             aggregated.censorship = inferred
             aggregated.sources["censorship"] = "title_fallback"
             _log.info(
-                "metadata.censorship_title_fallback",
+                "metadata.censorship_resolved",
                 canonical_key=content.canonical_key,
+                reason="title",
                 censorship=inferred.value,
                 evidence=evidence,
             )
@@ -236,13 +265,20 @@ class MetadataCoordinator:
         # Only for FC2 content: a generic torrent is not an FC2 product and must not
         # be labelled by a rule that does not apply to it.
         if content.content_type is not ContentType.FC2:
+            _log.info(
+                "metadata.censorship_resolved",
+                canonical_key=content.canonical_key,
+                reason="generic_skip",
+                censorship=Censorship.UNKNOWN.value,
+            )
             return
         aggregated.censorship = Censorship.CENSORED
         aggregated.sources["censorship"] = "default"
         _log.info(
-            "metadata.censorship_default",
+            "metadata.censorship_resolved",
             canonical_key=content.canonical_key,
-            reason="page_unavailable",
+            reason="default",
+            censorship=Censorship.CENSORED.value,
         )
 
 
@@ -431,7 +467,13 @@ class MetadataCoordinator:
             aggregated.release_date = result.release_date
             aggregated.sources["release_date"] = result.provider
 
-        if result.censorship is not None:
+        # A provider returning UNKNOWN has no opinion: it must not claim the field,
+        # otherwise the "censored by default" rule below would be skipped.
+        if result.censorship is not None and result.censorship is not Censorship.UNKNOWN:
+            current_source = aggregated.sources.get("censorship", "")
+            if current_source.startswith("conflict:"):
+                # A real conflict is settled: a third opinion does not un-conflict it.
+                return
             if aggregated.censorship is Censorship.UNKNOWN:
                 aggregated.censorship = result.censorship
                 aggregated.sources["censorship"] = result.provider

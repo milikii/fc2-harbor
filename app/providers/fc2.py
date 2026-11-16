@@ -150,7 +150,10 @@ def censorship_from_tags(
         return Censorship.THIN, {"source": "official_tags", "tags": tags}
 
     inferred, evidence = infer_censorship({"title": title, "release_title": release_title})
-    if inferred is not None:
+    # A within-title conflict (【無】 and 【有】 both present) is "no opinion" here;
+    # the page-level default below still applies. Never return UNKNOWN: the
+    # coordinator decides conflicts between providers, not inside one source.
+    if inferred is not None and inferred is not Censorship.UNKNOWN:
         evidence = {**evidence, "source": "title"}
         return inferred, evidence
 

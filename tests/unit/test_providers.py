@@ -556,7 +556,11 @@ def test_censorship_reads_the_release_title() -> None:
 
 
 def test_censorship_conflict_between_title_and_release_title() -> None:
-    """Two contradicting title signals: refuse to pick a winner."""
+    """Contradicting titles inside one source fall back to the FC2 default.
+
+    Cross-source conflicts are the coordinator's job; a provider never reports
+    UNKNOWN (deviation §60).
+    """
 
     html_page = (
         '<html><head><meta property="og:title" content="FC2-PPV-1234567 【無】作品">'
@@ -573,11 +577,8 @@ def test_censorship_conflict_between_title_and_release_title() -> None:
     )
 
     assert result is not None
-    assert result.censorship is Censorship.UNKNOWN
-    evidence = result.raw["censorship_evidence"]
-    assert evidence["conflict"] is True
-    fields = {item["field"] for item in evidence["matches"]}
-    assert {"title", "release_title"} <= fields
+    assert result.censorship is Censorship.CENSORED
+    assert result.raw["censorship_evidence"]["source"] == "default"
 
 
 def test_censorship_evidence_records_the_default() -> None:

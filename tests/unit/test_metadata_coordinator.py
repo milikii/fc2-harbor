@@ -584,3 +584,67 @@ async def test_rate_limited_is_counted_separately_from_errors(tmp_path: Path) ->
     assert snapshot.error == 0
     # It must not count towards the "this provider is broken" threshold.
     assert engine._failures.get("Javdb", 0) == 0
+
+
+# -- a provider saying UNKNOWN has no opinion ---------------------------------
+
+
+async def test_provider_unknown_does_not_block_the_default(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNKNOWN))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "default"
+
+
+async def test_provider_unknown_still_allows_the_title_to_decide(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNKNOWN))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(),
+        ProviderContext(
+            canonical_key="fc2_ppv:1234567", release_title="FC2-PPV-1234567 【無】作品"
+        ),
+        min_previews=0,
+    )
+
+    assert aggregated.censorship is Censorship.UNCENSORED
+    assert aggregated.sources["censorship"] == "title_fallback"
+
+
+async def test_provider_none_keeps_the_default_logic(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="作品"))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "default"
+
+
+async def test_contradicting_titles_become_a_conflict(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="【無】作品"))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(),
+        ProviderContext(
+            canonical_key="fc2_ppv:1234567", release_title="FC2-PPV-1234567 【有】作品"
+        ),
+        min_previews=0,
+    )
+
+    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.sources["censorship"] == "conflict:title,release_title"
+
+
+async def test_a_third_provider_does_not_un_conflict(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNCENSORED))
+    b = FakeProvider("B", result=result("B", title="作品", censorship=Censorship.CENSORED))
+    c = FakeProvider("C", result=result("C", title="作品", censorship=Censorship.CENSORED))
+
+    aggregated = await coordinator(a, b, c, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.sources["censorship"].startswith("conflict:")

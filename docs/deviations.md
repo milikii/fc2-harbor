@@ -536,3 +536,13 @@
   - **精确编号匹配**：从卡片标题里提取 `FC2[-PPV]-<数字>`，必须与请求编号完全相等；`4906053` 不会顶替 `4906073`（宁可没有，不要错数据）；
   - 只用搜索结果页：标题、封面（`c0.jdbstatic.com/covers/…`）、标题里的 `【無】/【有】/【薄】` 标记；详情页要登录，不碰。
 - **新发现（2026-11-16 实测）**：即使等 60 秒、带 `over18=1` cookie 并先访问首页预热，匿名搜索仍然返回 **`<title>登入 | JavDB</title>`（33KB 登录页）**，没有结果。所以「javdb 只是被限流」只在部分时段/网络下成立，目前匿名访问是**登录墙**。适配器把这种情况报成 `login_required`，既不算 `structure_changed`（避免继续污染那 38 条统计），也不假装限流。
+
+## 60. provider 不再返回 UNKNOWN；默认有码不会被绕过
+
+- 问题：`_merge` 只要 `result.censorship is not None` 就写 `sources["censorship"]`，于是一个返回 `Censorship.UNKNOWN` 的 provider 会把字段「占住」，`_apply_censorship_title_fallback` 里 `if "censorship" in sources: return` 直接退出——默认有码永远不生效，标签停在 unknown。
+- 实现：
+  - `_merge`：只有 `result.censorship` **既不是 None 也不是 UNKNOWN** 时才参与合并；UNKNOWN 等同于「没意见」；
+  - 冲突状态不会被第三个 provider 抹平：`sources["censorship"]` 以 `conflict:` 开头时直接跳过后续合并；
+  - `_apply_censorship_title_fallback` 的早退条件收窄为 **只有 `conflict:` 前缀**（真冲突）；标题之间互相矛盾（`【無】` vs `【有】`）也记成 `conflict:title,release_title` 并保持 unknown；
+  - 各 provider 不再返回 UNKNOWN：`censorship_from_tags` 的标题冲突回落到页面默认（`source=default`），javdb 把 UNKNOWN 转成 `None`。
+- 诊断：`_apply_censorship_title_fallback` 每个分支都打 `metadata.censorship_resolved {reason}`，reason 取 `provider_value` / `conflict` / `title` / `default` / `generic_skip`，日志里一眼能看出这张卡为什么是这个标签。
