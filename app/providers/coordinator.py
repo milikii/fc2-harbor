@@ -286,11 +286,25 @@ class MetadataCoordinator:
             )
             if miss:
                 self._failures[provider.id] = 0
+            elif exc.code == "rate_limited":
+                # Throttling says nothing about the site's health: retry next round
+                # without burning this round's quota.
+                _log.info(
+                    "metadata.rate_limited",
+                    provider=provider.id,
+                    canonical_key=content.canonical_key,
+                )
             else:
                 self._note_failure(provider.id, exc.code)
             self._record_metric(
                 provider.id,
-                "miss" if miss else ("structure" if exc.code == "structure_changed" else "error"),
+                "miss"
+                if miss
+                else (
+                    "rate_limited"
+                    if exc.code == "rate_limited"
+                    else ("structure" if exc.code == "structure_changed" else "error")
+                ),
                 latency,
             )
             return

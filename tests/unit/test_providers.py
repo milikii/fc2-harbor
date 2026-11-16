@@ -187,7 +187,10 @@ def test_missing_anchors_raise_structure_changed(
     _cover: bool,
     _previews: int,
 ) -> None:
-    empty = ProviderPage(url=url, html="<html><body><p>nothing here</p></body></html>", status=200)
+    # Long enough that javdb does not read it as a throttle stub (it reports
+    # ``rate_limited`` for tiny/empty pages — see the javdb tests).
+    body = "<html><body>" + "<p>nothing here</p>" * 100 + "</body></html>"
+    empty = ProviderPage(url=url, html=body, status=200)
     with pytest.raises(ProviderError) as excinfo:
         provider(cls).parse(empty, make_content())
     assert excinfo.value.code == "structure_changed"
@@ -810,3 +813,124 @@ def test_censorship_title_wins_even_when_the_page_is_unavailable() -> None:
     )
     assert verdict is Censorship.UNCENSORED
     assert evidence["source"] == "title"
+
+
+# -- javdb: rate limits, exact numbers, search-page-only data ------------------
+
+
+def javdb_page(html: str, status: int = 200) -> ProviderPage:
+    return ProviderPage(
+        url="https://javdb.com/search?q=FC2-PPV-4906073&f=all", html=html, status=status
+    )
+
+
+def javdb_card(number: str, *, title_suffix: str = "作品", cover: str = "/covers/ab/x.jpg") -> str:
+    return (
+        '<div class="movie-list"><div class="item">'
+        f'<a class="box" href="/v/abc123">'
+        f'<div class="cover"><img src="{cover}"></div>'
+        f'<div class="video-title"><strong>FC2-{number}</strong>{title_suffix}</div>'
+        "</a><div class=\"meta\">2020-11-14</div></div></div>"
+    )
+
+
+def javdb_padded(html: str) -> str:
+    """Keep the page above the throttle-stub size threshold."""
+
+    return html + "<!--" + "x" * 600 + "-->"
+
+
+def test_javdb_accepts_an_exact_number_match() -> None:
+    html = javdb_padded(javdb_card("4906073", title_suffix="【無・ごっくん＆中出し】素人作品"))
+    result = provider(JavdbProvider).parse(javdb_page(html), make_content("4906073"))
+
+    assert result is not None
+    assert "【無・ごっくん＆中出し】" in (result.title_ja or "")
+    assert result.cover is not None and result.cover.url == "https://javdb.com/covers/ab/x.jpg"
+    assert result.censorship is Censorship.UNCENSORED
+
+
+def test_javdb_rejects_a_near_number() -> None:
+    """``4906053`` must not answer for ``4906073`` — no data beats wrong data."""
+
+    html = javdb_padded(javdb_card("4906053"))
+    assert provider(JavdbProvider).parse(javdb_page(html), make_content("4906073")) is None
+
+
+def test_javdb_403_is_rate_limited_not_structure_changed() -> None:
+    with pytest.raises(ProviderError) as excinfo:
+        provider(JavdbProvider).parse(
+            javdb_page("", status=403), make_content("4906073")
+        )
+    assert excinfo.value.code == "rate_limited"
+
+
+def test_javdb_empty_body_is_rate_limited() -> None:
+    with pytest.raises(ProviderError) as excinfo:
+        provider(JavdbProvider).parse(javdb_page(""), make_content("4906073"))
+    assert excinfo.value.code == "rate_limited"
+
+
+def test_javdb_throttles_between_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = provider(JavdbProvider)
+    # Defaults live in the adapter so an old config cannot hammer the site.
+    assert adapter.min_interval_seconds >= 7
+    assert adapter.jitter_seconds > 0
+
+
+async def test_javdb_retries_once_after_a_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    html = javdb_padded(javdb_card("4906073"))
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(403, text="")
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.providers.javdb.asyncio.sleep", no_sleep)
+    client = HttpClient(transport=httpx.MockTransport(handler))
+    adapter = JavdbProvider(client=client, proxy_url=None, timeout_seconds=5)
+    result = await adapter.fetch(
+        make_content("4906073"), ProviderContext(canonical_key="fc2_ppv:4906073")
+    )
+
+    assert len(calls) == 2
+    assert result.title_ja and "4906073" in result.title_ja
+    await client.aclose()
+
+
+async def test_javdb_two_403s_end_as_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="")
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.providers.javdb.asyncio.sleep", no_sleep)
+    client = HttpClient(transport=httpx.MockTransport(handler))
+    adapter = JavdbProvider(client=client, proxy_url=None, timeout_seconds=5)
+
+    with pytest.raises(ProviderError) as excinfo:
+        await adapter.fetch(
+            make_content("4906073"), ProviderContext(canonical_key="fc2_ppv:4906073")
+        )
+    assert excinfo.value.code == "rate_limited"
+    await client.aclose()
+
+
+def test_javdb_login_wall_is_reported_as_such() -> None:
+    """Anonymous search returns the login page; that is neither throttling nor a
+    markup change, and must be distinguishable in /providers."""
+
+    html = (
+        "<html><head><title>登入 | JavDB 成人影片數據庫</title></head><body>"
+        + "<div>請先登入</div>" * 50
+        + "</body></html>"
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        provider(JavdbProvider).parse(javdb_page(html), make_content("4906073"))
+    assert excinfo.value.code == "login_required"

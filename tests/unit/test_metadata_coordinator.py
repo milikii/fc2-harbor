@@ -560,3 +560,27 @@ async def test_provider_conflict_stays_unknown(tmp_path: Path) -> None:
 
     assert aggregated.censorship is Censorship.UNKNOWN
     assert aggregated.sources["censorship"].startswith("conflict:")
+
+
+async def test_rate_limited_is_counted_separately_from_errors(tmp_path: Path) -> None:
+    """Throttling is neither a miss nor a broken site."""
+
+    from app.services.metrics import Metrics
+
+    metrics = Metrics()
+    a = FakeProvider("Javdb", error="rate_limited")
+    engine = MetadataCoordinator(
+        providers=[a], settings=make_settings(tmp_path), metrics=metrics
+    )
+
+    aggregated = await engine.aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.runs[0].error_code == "rate_limited"
+    snapshot = metrics.providers["Javdb"]
+    assert snapshot.rate_limited == 1
+    assert snapshot.structure == 0
+    assert snapshot.error == 0
+    # It must not count towards the "this provider is broken" threshold.
+    assert engine._failures.get("Javdb", 0) == 0

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-PROVIDER_OUTCOMES = ("hit", "miss", "structure", "error")
+PROVIDER_OUTCOMES = ("hit", "miss", "structure", "rate_limited", "error")
 
 
 @dataclass(slots=True)
@@ -27,6 +27,9 @@ class ProviderMetrics:
     hit: int = 0
     miss: int = 0
     structure: int = 0
+    #: The site throttled us (403 / empty body / timeout): retry next round, and do
+    #: not count it as a broken selector or a broken site.
+    rate_limited: int = 0
     error: int = 0
     calls: int = 0
     latency_ms_total: int = 0
