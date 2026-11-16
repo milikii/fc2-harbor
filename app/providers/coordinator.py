@@ -236,14 +236,15 @@ class MetadataCoordinator:
             return
 
         if inferred is Censorship.UNKNOWN:
-            # The titles themselves contradict each other (【無】 in one, 【有】 in the
-            # other): a real conflict, not a missing value.
-            aggregated.sources["censorship"] = "conflict:title,release_title"
-            _log.info(
-                "metadata.censorship_resolved",
+            # The titles contradict each other (【無】 in one, 【有】 in the other).
+            # The old system never showed "unknown": a contradiction resolves to the
+            # FC2 default, with the conflicting wording kept as evidence.
+            aggregated.censorship = Censorship.CENSORED
+            aggregated.sources["censorship"] = "default"
+            _log.warning(
+                "metadata.censorship_title_conflict_resolved",
                 canonical_key=content.canonical_key,
-                reason="conflict",
-                censorship=Censorship.UNKNOWN.value,
+                resolved="censored",
                 evidence=evidence,
             )
             return
@@ -472,17 +473,26 @@ class MetadataCoordinator:
         if result.censorship is not None and result.censorship is not Censorship.UNKNOWN:
             current_source = aggregated.sources.get("censorship", "")
             if current_source.startswith("conflict:"):
-                # A real conflict is settled: a third opinion does not un-conflict it.
-                return
-            if aggregated.censorship is Censorship.UNKNOWN:
+                # A conflict is already settled; a third opinion does not change it.
+                # Only the censorship field is skipped — cover/previews below must
+                # still be merged.
+                pass
+            elif aggregated.censorship is Censorship.UNKNOWN:
                 aggregated.censorship = result.censorship
                 aggregated.sources["censorship"] = result.provider
             elif aggregated.censorship is not result.censorship:
-                # Spec 7.3: conflicting sources mean UNKNOWN, and the conflict is
-                # recorded rather than silently resolved.
-                aggregated.censorship = Censorship.UNKNOWN
+                # Deviation from §7.3: the user never wants "unknown" on a card, and
+                # FC2 products are censored unless a tag says otherwise. The conflict
+                # is still recorded as evidence, but the value stays CENSORED.
                 aggregated.sources["censorship"] = (
                     f"conflict:{aggregated.sources.get('censorship', '?')},{result.provider}"
+                )
+                aggregated.censorship = Censorship.CENSORED
+                _log.warning(
+                    "metadata.censorship_conflict",
+                    canonical_key=aggregated.content_key,
+                    source=aggregated.sources["censorship"],
+                    resolved="censored",
                 )
 
         if aggregated.cover is None and result.cover is not None:

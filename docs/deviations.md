@@ -546,3 +546,13 @@
   - `_apply_censorship_title_fallback` 的早退条件收窄为 **只有 `conflict:` 前缀**（真冲突）；标题之间互相矛盾（`【無】` vs `【有】`）也记成 `conflict:title,release_title` 并保持 unknown；
   - 各 provider 不再返回 UNKNOWN：`censorship_from_tags` 的标题冲突回落到页面默认（`source=default`），javdb 把 UNKNOWN 转成 `None`。
 - 诊断：`_apply_censorship_title_fallback` 每个分支都打 `metadata.censorship_resolved {reason}`，reason 取 `provider_value` / `conflict` / `title` / `default` / `generic_skip`，日志里一眼能看出这张卡为什么是这个标签。
+
+## 61. 冲突也默认有码：FC2 内容的 `censorship` 永不出现 unknown
+
+- 偏离规格书 **§7.3「冲突判 UNKNOWN」**。理由：用户明确要求卡片上不能出现「未知」（旧项目 `_censor_label()` 只有无码/薄码/有码三个返回值），而 FC2 资源默认有码。
+- 实现（`app/providers/coordinator.py`）：
+  - **provider 之间冲突**（一个 CENSORED 一个 UNCENSORED）→ 值取 `CENSORED`，`sources["censorship"]` 保留 `conflict:a,b` 作为证据，日志 `metadata.censorship_conflict {resolved: censored}`；
+  - **标题之间冲突**（`【無】` vs `【有】`）→ 值取 `CENSORED`，`sources["censorship"] = "default"`，evidence 里保留命中的词，日志 `metadata.censorship_title_conflict_resolved {resolved: censored}`；
+  - 冲突一旦确定，后续 provider 不会把它改回别的值（但封面/预览/日期仍照常合并）；
+  - 因此 **FC2 内容的 `censorship` 在任何路径上都不会是 `UNKNOWN`**；唯一例外是 `content_type=generic` 的非 FC2 资源，它们本来就不该被这条规则贴标签。
+- 影响：`/providers` 与卡片上不会再出现「未知」；`docs/deploy.md` 的 `unknown` 相关排查条目只对 generic 内容成立。

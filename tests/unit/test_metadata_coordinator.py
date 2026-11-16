@@ -184,7 +184,7 @@ async def test_censorship_conflict_becomes_unknown(tmp_path: Path) -> None:
         make_content(), ctx(), min_previews=0
     )
 
-    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.censorship is Censorship.CENSORED
     assert aggregated.sources["censorship"].startswith("conflict:")
 
 
@@ -548,8 +548,8 @@ async def test_generic_content_is_not_forced_to_censored(tmp_path: Path) -> None
     assert aggregated.censorship is Censorship.UNKNOWN
 
 
-async def test_provider_conflict_stays_unknown(tmp_path: Path) -> None:
-    """Two providers contradicting each other is a real conflict, not a gap."""
+async def test_provider_conflict_resolves_to_censored(tmp_path: Path) -> None:
+    """Deviation from §7.3: "unknown" never appears on a card (deviation §61)."""
 
     a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNCENSORED))
     b = FakeProvider("B", result=result("B", title="作品", censorship=Censorship.CENSORED))
@@ -558,7 +558,8 @@ async def test_provider_conflict_stays_unknown(tmp_path: Path) -> None:
         make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
     )
 
-    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.censorship is Censorship.CENSORED
+    # The disagreement is still visible as evidence.
     assert aggregated.sources["censorship"].startswith("conflict:")
 
 
@@ -623,7 +624,7 @@ async def test_provider_none_keeps_the_default_logic(tmp_path: Path) -> None:
     assert aggregated.sources["censorship"] == "default"
 
 
-async def test_contradicting_titles_become_a_conflict(tmp_path: Path) -> None:
+async def test_contradicting_titles_resolve_to_censored(tmp_path: Path) -> None:
     a = FakeProvider("A", result=result("A", title="【無】作品"))
     aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
         make_content(),
@@ -633,8 +634,8 @@ async def test_contradicting_titles_become_a_conflict(tmp_path: Path) -> None:
         min_previews=0,
     )
 
-    assert aggregated.censorship is Censorship.UNKNOWN
-    assert aggregated.sources["censorship"] == "conflict:title,release_title"
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "default"
 
 
 async def test_a_third_provider_does_not_un_conflict(tmp_path: Path) -> None:
@@ -646,5 +647,24 @@ async def test_a_third_provider_does_not_un_conflict(tmp_path: Path) -> None:
         make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
     )
 
-    assert aggregated.censorship is Censorship.UNKNOWN
+    assert aggregated.censorship is Censorship.CENSORED
     assert aggregated.sources["censorship"].startswith("conflict:")
+
+
+async def test_a_settled_conflict_still_merges_cover_and_previews(tmp_path: Path) -> None:
+    """The censorship guard must not skip the rest of the merge."""
+
+    a = FakeProvider("A", result=result("A", title="作品", censorship=Censorship.UNCENSORED))
+    b = FakeProvider("B", result=result("B", title="作品", censorship=Censorship.CENSORED))
+    c = FakeProvider(
+        "C",
+        result=result("C", title="作品", cover="https://cdn/c.jpg", previews=["https://cdn/p1.jpg"]),
+    )
+
+    aggregated = await coordinator(a, b, c, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.cover is not None and aggregated.cover.url == "https://cdn/c.jpg"
+    assert [item.url for item in aggregated.previews] == ["https://cdn/p1.jpg"]
