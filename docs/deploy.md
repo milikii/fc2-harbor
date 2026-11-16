@@ -301,6 +301,7 @@ docker compose run --rm app python scripts/retry_covers.py
 
 - 只动 `contents.cover_status` 和 `cover_retry_count`，不碰 `updated_at` 和其它字段；
 - `--since 7` 只处理最近 7 天创建的内容；`--only fc2_ppv:5007946` 只处理指定编号；
+- `--min-cover-dimension 400`：额外把**已有封面短边小于 400px** 的内容也重置（清掉 300x250 广告封面这类脏数据）；默认不启用；
 - 幂等：第二次跑 `reset=0`；
 - 报告 `retry-covers-report.json` 列出被重置的编号。
 

@@ -28,10 +28,10 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings
-from app.db.enums import CoverStatus
-from app.db.models import Content
+from app.db.enums import AssetRole, CoverStatus
+from app.db.models import Asset, Content
 from app.db.session import Database, migrate_async
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -55,30 +55,67 @@ class RetryReport:
         }
 
 
+def _filtered(stmt: object, *, since_days: int | None, only: str | None) -> object:
+    if only:
+        stmt = stmt.where(Content.canonical_key == only)  # type: ignore[attr-defined]
+    if since_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=since_days)
+        # ``created_at``, not ``updated_at``: the latter is metadata-fetch time and
+        # has been polluted by older tooling (docs/deviations.md §40).
+        stmt = stmt.where(Content.created_at >= cutoff)  # type: ignore[attr-defined]
+    return stmt
+
+
 async def retry_covers(
     session: AsyncSession,
     *,
     since_days: int | None = None,
     only: str | None = None,
+    min_cover_dimension: int | None = None,
     report: RetryReport,
 ) -> RetryReport:
-    """Reset every ``give_up`` row (optionally filtered); idempotent."""
+    """Reset ``give_up`` rows — and, optionally, contents with a tiny cover.
 
-    stmt = select(Content).where(Content.cover_status == CoverStatus.GIVE_UP.value)
-    if only:
-        stmt = stmt.where(Content.canonical_key == only)
-    if since_days is not None:
-        cutoff = datetime.now(UTC) - timedelta(days=since_days)
-        # ``created_at``, not ``updated_at``: the latter is metadata-fetch time and
-        # has been polluted by older tooling (docs/deviations.md §40).
-        stmt = stmt.where(Content.created_at >= cutoff)
-    stmt = stmt.order_by(Content.created_at)
+    ``min_cover_dimension`` exists because a 300x250 advertising banner can pass as a
+    "cover": those rows must be re-fetched, even though their status is ``ready``.
+    """
 
-    for content in (await session.scalars(stmt)).all():
-        report.scanned += 1
+    targets: dict[str, str] = {}
+    contents: dict[str, Content] = {}
+
+    give_up_stmt = _filtered(
+        select(Content).where(Content.cover_status == CoverStatus.GIVE_UP.value),
+        since_days=since_days,
+        only=only,
+    )
+    for content in (await session.scalars(give_up_stmt)).all():  # type: ignore[arg-type]
+        targets[content.id] = "give_up"
+        contents[content.id] = content
+
+    if min_cover_dimension:
+        small_stmt = _filtered(
+            select(Content)
+            .join(Asset, Asset.content_id == Content.id)
+            .where(
+                Asset.role == AssetRole.COVER,
+                or_(
+                    Asset.width < min_cover_dimension,
+                    Asset.height < min_cover_dimension,
+                ),
+            ),
+            since_days=since_days,
+            only=only,
+        )
+        for content in (await session.scalars(small_stmt)).all():  # type: ignore[arg-type]
+            contents.setdefault(content.id, content)
+            targets.setdefault(content.id, "small_cover")
+
+    report.scanned = len(targets)
+    for content_id, reason in targets.items():
+        content = contents[content_id]
         await session.execute(
             update(Content)
-            .where(Content.id == content.id)
+            .where(Content.id == content_id)
             .values(
                 cover_status=CoverStatus.PENDING.value,
                 cover_retry_count=0,
@@ -92,6 +129,7 @@ async def retry_covers(
             {
                 "canonical_key": content.canonical_key,
                 "display_code": content.display_code,
+                "reason": reason,
                 "was_retry_count": content.cover_retry_count,
             }
         )
@@ -114,6 +152,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--only", default=None, metavar="CANONICAL_KEY", help="only this canonical key"
     )
+    parser.add_argument(
+        "--min-cover-dimension",
+        type=int,
+        default=None,
+        metavar="PX",
+        help=(
+            "also reset contents whose cover has a short side below PX "
+            "(e.g. 400 to drop 300x250 ad banners)"
+        ),
+    )
     parser.add_argument("--report", default="retry-covers-report.json", help="report path")
     return parser.parse_args(argv)
 
@@ -130,6 +178,7 @@ async def run(args: argparse.Namespace) -> RetryReport:
                     session,
                     since_days=args.since,
                     only=args.only,
+                    min_cover_dimension=args.min_cover_dimension,
                     report=report,
                 )
                 if args.dry_run:
@@ -155,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         "duration_seconds": round(time.monotonic() - started, 3),
         "since_days": args.since,
         "only": args.only,
+        "min_cover_dimension": args.min_cover_dimension,
         **report.as_dict(),
     }
     Path(args.report).write_text(

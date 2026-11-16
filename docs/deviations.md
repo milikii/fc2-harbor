@@ -414,6 +414,7 @@
 
 - 背景：`publisher.require_cover` 会把重试超限的内容标 `give_up` 并永久跳过；Nyaa fallback 修好后这些内容本可以出卡。
 - 实现：把 `cover_status='give_up'` 重置为 `pending`、`cover_retry_count=0`，只动这两列（`updated_at` 钉住不动，见 §42）。支持 `--dry-run`、`--since DAYS`（按 `created_at` 过滤——`updated_at` 曾被污染过，不适合做时间依据）、`--only CANONICAL_KEY`；幂等（第二次 `reset=0`）；报告 `retry-covers-report.json`。
+- `--min-cover-dimension PX`（默认关闭）：额外重置**已有封面短边小于 PX** 的内容（`assets.role=cover` 的 `width`/`height`），用于清掉 300x250 广告封面这类脏数据；同一内容同时满足两个条件只重置一次，报告里 `reason` 记 `give_up` 或 `small_cover`。
 - 推送队列的配合：SQL 只排除 `cover_status='give_up'`，`pending` / `pending_cover` 仍留在队列里，这样 publisher 每轮才有机会重试。
 
 ## 50. 标签：聚合结束后用标题兜底
@@ -475,9 +476,10 @@
 - 问题：`kr-av.com/upload/…jpg` 这类链接返回的是 HTML 查看页（`text/html`），图片本体在页面里，直接抓只能拿到网页。
 - 实现（`app/network/image_fetcher.py`）：
   - `fetch(..., resolve_viewer=…)`：遇到 `Content-Type: text/html` 且允许解析时，把 HTML 交给 `image_url_from_viewer()`；
-  - 候选顺序：`meta[property="og:image"]` → `meta[name="twitter:image"]` → `<img>` 中"最大"的一张（显式 `width*height` 优先，class/id 含 `image`/`photo`/`main` 加权）→ `<a href>` 指向 `.jpg/.jpeg/.png/.webp/.gif`；
+  - **多候选 + 排序**（`viewer_candidates()`）：先按 URL 过滤广告（`banner`/`ads`/`adv`/`candy`/`promo`/`sponsor`/`aff`/`partner`/`300x250`/`728x90`/`160x600`/`320x50`/`/assets/`/`/img/candy/`），再按 `og:image`/`twitter:image` → 主内容区（`#content`/`.main`/`.image`/`article`）→ 声明尺寸 → 图片 CDN 域名（`img\d+\.`/`cdn\.`/`i\.`/`pbs\.`）→ 路径含 `/i/`、`/upload/`、`/images/` 排序；GIF 只降权不排除；
   - 找到后**重新走完整抓取流程**（IP 校验、大小、Content-Type、Pillow 解码），不是绕过；
-  - **最多跟一层**：解析出的地址若仍是 HTML，记 `image.viewer_unresolved` 并放弃，不递归。
-- 日志：`image.viewer_page_detected`、`image.viewer_resolved {found_url}`、`image.viewer_unresolved {reason}`。
+  - **最多跟一层**：解析出的地址若仍是 HTML，记 `image.viewer_unresolved` 并放弃，不递归；
+  - **下载后尺寸校验**（只对查看页候选）：短边 ≥ 400px、文件 ≥ 20KB、必须是 `image/*`、Pillow 能解码；不合格就试下一个候选，**最多 5 个**，全不合格记 `viewer_unresolved {reason: all_candidates_rejected}`。这条是必须的：imagetwist 页面第一个 `<img>` 是 300x250 的广告位，不校验就会把广告当封面。
+- 日志：`image.viewer_page_detected`、`image.viewer_candidate {url, source, reason_rejected}`（每个被跳过的候选都记一条，能看出为什么选了这张）、`image.viewer_resolved {url, width, height, bytes}`、`image.viewer_unresolved {reason}`。
 - 只在 **Nyaa fallback** 的图片上启用（`provider == "Nyaa"`）；provider 自己的封面不做二次解析，避免把正常图片误当查看页。
 - 实测（经代理）：`https://kr-av.com/upload/…-FC2-PPV-5007946.jpg` 解析出真实图片 `700x700 / 154KB / image/jpeg`。

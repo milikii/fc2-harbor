@@ -7,6 +7,8 @@ bodies and redirects to private addresses.
 
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -16,6 +18,17 @@ from app.network.image_fetcher import FetchedImage, ImageFetcher, ImageFetchErro
 from PIL import Image
 
 PUBLIC_IP = "93.184.216.34"
+
+
+@lru_cache(maxsize=4)
+def big_png_bytes(width: int = 500, height: int = 846) -> bytes:
+    """A real-looking cover: noise so the PNG is well above the 20KB floor."""
+
+    buffer = BytesIO()
+    Image.frombytes("RGB", (width, height), os.urandom(width * height * 3)).save(
+        buffer, format="PNG"
+    )
+    return buffer.getvalue()
 
 
 def png_bytes(width: int = 12, height: int = 8) -> bytes:
@@ -84,7 +97,10 @@ async def test_non_image_content_types_are_rejected(tmp_path: Path, content_type
 
 async def test_spoofed_content_type_is_rejected_by_pillow(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"not an image", headers={"content-type": "image/png"})
+        # Above the 20KB floor so the decode check is what rejects it.
+        return httpx.Response(
+            200, content=b"x" * 30_000, headers={"content-type": "image/png"}
+        )
 
     fetcher = make_fetcher(tmp_path, handler)
     try:
@@ -396,7 +412,7 @@ VIEWER_HTML = """
 
 
 async def test_viewer_page_resolves_og_image(tmp_path: Path) -> None:
-    body = png_bytes()
+    body = big_png_bytes()
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -429,7 +445,7 @@ async def test_viewer_page_picks_the_largest_img(tmp_path: Path) -> None:
       <img src="/medium.jpg" width="300" height="200">
     </body></html>
     """
-    body = png_bytes()
+    body = big_png_bytes()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/page":
@@ -462,24 +478,35 @@ async def test_viewer_page_without_images_gives_up(tmp_path: Path) -> None:
 
 
 async def test_viewer_resolution_to_a_private_address_is_rejected(tmp_path: Path) -> None:
-    html_page = '<html><head><meta property="og:image" content="https://internal.example.net/x.jpg"></head></html>'
-    resolved = {
-        "img.example.com": [PUBLIC_IP],
-        "internal.example.net": ["10.0.0.5"],
-    }
+    from structlog.testing import capture_logs
+
+    html_page = (
+        '<html><head><meta property="og:image" '
+        'content="https://internal.example.net/x.jpg"></head></html>'
+    )
+    resolved = {"img.example.com": [PUBLIC_IP], "internal.example.net": ["10.0.0.5"]}
+    requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
         return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
 
     fetcher = make_fetcher(
         tmp_path, handler, resolver=lambda host: resolved.get(host, [PUBLIC_IP])
     )
     try:
-        with pytest.raises(ImageFetchError) as excinfo:
-            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+        with capture_logs() as logs:
+            with pytest.raises(ImageFetchError):
+                await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
     finally:
         await fetcher.aclose()
-    assert excinfo.value.code == "ssrf_blocked"
+
+    # The private host is never contacted.
+    assert "internal.example.net" not in requested
+    rejected = [
+        entry for entry in logs if entry["event"] == "image.viewer_candidate"
+    ]
+    assert rejected and rejected[0]["reason_rejected"] == "ssrf_blocked"
 
 
 async def test_viewer_resolution_follows_only_one_level(tmp_path: Path) -> None:
@@ -513,26 +540,34 @@ async def test_viewer_resolution_is_off_by_default(tmp_path: Path) -> None:
 
 
 async def test_resolved_image_still_must_be_a_real_image(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
     html_page = '<html><head><meta property="og:image" content="/fake.png"></head></html>'
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/page":
             return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
-        return httpx.Response(200, content=b"not an image", headers={"content-type": "image/png"})
+        # Above the 20KB floor so the decode check is what rejects it.
+        return httpx.Response(
+            200, content=b"x" * 30_000, headers={"content-type": "image/png"}
+        )
 
     fetcher = make_fetcher(tmp_path, handler)
     try:
-        with pytest.raises(ImageFetchError) as excinfo:
-            await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
+        with capture_logs() as logs:
+            with pytest.raises(ImageFetchError) as excinfo:
+                await fetcher.fetch("https://img.example.com/page", resolve_viewer=True)
     finally:
         await fetcher.aclose()
-    assert excinfo.value.code == "not_an_image"
+    assert excinfo.value.code == "bad_content_type"  # no usable candidate
+    rejected = [entry for entry in logs if entry["event"] == "image.viewer_candidate"]
+    assert rejected and rejected[0]["reason_rejected"] == "not_an_image"
 
 
 async def test_viewer_logs_are_emitted(tmp_path: Path) -> None:
     from structlog.testing import capture_logs
 
-    body = png_bytes()
+    body = big_png_bytes()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/page":
@@ -573,3 +608,202 @@ def test_viewer_parser_falls_back_to_image_links() -> None:
 
     html_page = '<html><body><a href="/photo/full.png">full size</a></body></html>'
     assert image_url_from_viewer(html_page, "https://viewer.example/p/1") == "https://viewer.example/photo/full.png"
+
+
+# -- viewer ranking: ads must never become the cover --------------------------
+
+AD_VIEWER = """
+<html><body>
+  <img src="https://imagetwist.com/img/candy/assets/banner_300x250.gif" width="300" height="250">
+  <img src="/img/candy/assets/promo_728x90.jpg" width="728" height="90">
+</body></html>
+"""
+
+MIXED_VIEWER = """
+<html><body>
+  <div class="header">
+    <img src="https://imagetwist.com/img/candy/assets/side_banner.gif" width="160" height="600">
+  </div>
+  <div id="content">
+    <img src="/thumb_small.jpg" width="120" height="90">
+    <img data-src="https://img166.imagetwist.com/i/80079/real-cover.png" width="500" height="846">
+  </div>
+</body></html>
+"""
+
+
+def viewer_handler(pages: dict[str, bytes], images: dict[str, bytes]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path in pages:
+            return httpx.Response(200, content=pages[path], headers={"content-type": "text/html"})
+        if path in images:
+            return httpx.Response(200, content=images[path], headers={"content-type": "image/png"})
+        return httpx.Response(404, text="missing")
+
+    return handler
+
+
+async def test_real_cover_beats_the_ad_banner(tmp_path: Path) -> None:
+    body = big_png_bytes()
+    handler = viewer_handler(
+        {"/page": MIXED_VIEWER.encode()},
+        {"/i/80079/real-cover.png": body},
+    )
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        image = await fetcher.fetch("https://imagetwist.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    assert image.final_url == "https://img166.imagetwist.com/i/80079/real-cover.png"
+    assert (image.width, image.height) == (500, 846)
+
+
+async def test_only_ad_banners_means_unresolved(tmp_path: Path) -> None:
+    """A 300x250 ad slot is not a cover: reject every candidate instead."""
+
+    from structlog.testing import capture_logs
+
+    banner = png_bytes(300, 250)  # small in pixels *and* in bytes
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=AD_VIEWER, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=banner, headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with capture_logs() as logs:
+            with pytest.raises(ImageFetchError):
+                await fetcher.fetch("https://imagetwist.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    events = [entry["event"] for entry in logs]
+    assert "image.viewer_unresolved" in events
+    unresolved = next(e for e in logs if e["event"] == "image.viewer_unresolved")
+    # Ad URLs are dropped before any download is attempted.
+    assert unresolved["reason"] == "no_image_found"
+
+
+async def test_og_image_pointing_at_an_ad_falls_through(tmp_path: Path) -> None:
+    body = big_png_bytes()
+    html_page = """
+    <html><head>
+      <meta property="og:image" content="/img/candy/assets/banner_300x250.gif">
+    </head><body>
+      <div id="content"><img src="/i/80079/real.png" width="500" height="846"></div>
+    </body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+        if request.url.path == "/i/80079/real.png":
+            return httpx.Response(200, content=body, headers={"content-type": "image/png"})
+        return httpx.Response(
+            200, content=png_bytes(300, 250), headers={"content-type": "image/png"}
+        )
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        image = await fetcher.fetch("https://imagetwist.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    assert image.final_url == "https://imagetwist.com/i/80079/real.png"
+
+
+async def test_a_large_gif_is_still_accepted(tmp_path: Path) -> None:
+    buffer = BytesIO()
+    Image.frombytes("RGB", (500, 600), os.urandom(500 * 600 * 3)).save(buffer, format="GIF")
+    gif = buffer.getvalue()
+    html_page = '<html><body><img src="/i/80079/real.gif" width="500" height="600"></body></html>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=gif, headers={"content-type": "image/gif"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        image = await fetcher.fetch("https://imagetwist.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    assert image.path.suffix == ".gif"
+
+
+def test_ad_urls_are_filtered() -> None:
+    from app.network.image_fetcher import viewer_candidates
+
+    html_page = """
+    <html><body>
+      <img src="/img/candy/assets/banner_1.gif">
+      <img src="/ads/promo.jpg">
+      <img src="/i/80079/real.png">
+    </body></html>
+    """
+    urls = [c.url for c in viewer_candidates(html_page, "https://imagetwist.com/page")]
+    assert urls == ["https://imagetwist.com/i/80079/real.png"]
+
+
+def test_ranking_prefers_meta_then_main_area_then_size() -> None:
+    from app.network.image_fetcher import viewer_candidates
+
+    html_page = """
+    <html><head><meta property="og:image" content="/og.png"></head><body>
+      <img src="/outside_big.jpg" width="900" height="900">
+      <div id="content">
+        <img src="/inside_small.jpg" width="100" height="100">
+        <img src="/inside_big.jpg" width="800" height="800">
+      </div>
+    </body></html>
+    """
+    urls = [c.url for c in viewer_candidates(html_page, "https://x.example/p")]
+    assert urls[0] == "https://x.example/og.png"
+    assert urls[1] == "https://x.example/inside_big.jpg"
+    assert urls[2] == "https://x.example/inside_small.jpg"
+    assert urls[3] == "https://x.example/outside_big.jpg"
+
+
+def test_srcset_picks_the_largest_variant() -> None:
+    from app.network.image_fetcher import viewer_candidates
+
+    html_page = (
+        '<html><body><img src="/fallback.jpg" '
+        'srcset="/small.jpg 320w, /large.jpg 1200w, /medium.jpg 800w"></body></html>'
+    )
+    urls = [c.url for c in viewer_candidates(html_page, "https://x.example/p")]
+    assert "https://x.example/large.jpg" in urls
+
+
+async def test_a_small_candidate_is_rejected_by_the_size_gate(tmp_path: Path) -> None:
+    """A 300x250 image at a normal-looking URL still fails the dimension check."""
+
+    from structlog.testing import capture_logs
+
+    html_page = '<html><body><img src="/i/80079/small.png" width="300" height="250"></body></html>'
+    small = png_bytes(300, 250)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/page":
+            return httpx.Response(200, content=html_page, headers={"content-type": "text/html"})
+        return httpx.Response(200, content=small, headers={"content-type": "image/png"})
+
+    fetcher = make_fetcher(tmp_path, handler)
+    try:
+        with capture_logs() as logs:
+            with pytest.raises(ImageFetchError):
+                await fetcher.fetch("https://imagetwist.com/page", resolve_viewer=True)
+    finally:
+        await fetcher.aclose()
+
+    rejected = [e for e in logs if e["event"] == "image.viewer_candidate"]
+    assert rejected and rejected[0]["reason_rejected"] in {
+        "too_small_bytes",
+        "too_small_dimensions",
+    }
+    unresolved = next(e for e in logs if e["event"] == "image.viewer_unresolved")
+    assert unresolved["reason"] == "all_candidates_rejected"

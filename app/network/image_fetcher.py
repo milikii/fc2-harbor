@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
+import re
 import socket
 import tempfile
 import time
@@ -79,52 +80,182 @@ class FetchedImage:
 
 #: Image extensions accepted from a viewer page's links.
 _VIEWER_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+#: Advertising URL fragments: a viewer page is full of them.
+_AD_URL_MARKERS = (
+    "banner",
+    "ads",
+    "adv",
+    "candy",
+    "promo",
+    "sponsor",
+    "aff",
+    "partner",
+    "300x250",
+    "728x90",
+    "160x600",
+    "320x50",
+    "/assets/",
+    "/img/candy/",
+)
+#: Containers that hold the actual picture on a viewer page.
+_MAIN_SELECTORS = ("#content", ".main", ".image", "article")
+#: Hosts that look like an image CDN.
+_CDN_HOST_RE = re.compile(r"(^img\d*\.|^cdn\.|^i\.|^pbs\.)")
+#: Paths that usually hold the real picture.
+_IMAGE_PATH_MARKERS = ("/i/", "/upload/", "/images/")
+#: A viewer candidate must look like a real cover, not a 300x250 ad slot.
+VIEWER_MIN_SHORT_SIDE = 400
+VIEWER_MIN_BYTES = 20 * 1024
+VIEWER_MAX_CANDIDATES = 5
 
 
-def image_url_from_viewer(html_text: str, base_url: str) -> str | None:
-    """The most likely real image URL inside an HTML viewer page.
+@dataclass(frozen=True, slots=True)
+class ViewerCandidate:
+    """One image URL found on a viewer page, with the reason for its rank."""
 
-    Order: ``og:image`` → ``twitter:image`` → the largest ``<img>`` (explicit
-    width/height wins, then a class/id that looks like the main picture) → the first
-    link pointing at an image file. No guessing beyond that: ``None`` means "give up".
+    url: str
+    source: str
+    declared_area: int = 0
+    in_main: bool = False
+
+
+def _is_ad_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(marker in lowered for marker in _AD_URL_MARKERS)
+
+
+def _declared_area(node: object) -> int:
+    attributes = node.attributes or {}  # type: ignore[attr-defined]
+    try:
+        width = int(attributes.get("width") or 0)
+        height = int(attributes.get("height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    return width * height
+
+
+def _srcset_largest(value: str) -> str | None:
+    """The highest-resolution entry of a ``srcset`` attribute."""
+
+    best: tuple[int, str] | None = None
+    for part in value.split(","):
+        piece = part.strip().split()
+        if not piece:
+            continue
+        url = piece[0]
+        width = 0
+        for token in piece[1:]:
+            if token.endswith("w") and token[:-1].isdigit():
+                width = int(token[:-1])
+        if best is None or width > best[0]:
+            best = (width, url)
+    return best[1] if best else None
+
+
+def _in_main_area(node: object) -> bool:
+    parent = node.parent  # type: ignore[attr-defined]
+    while parent is not None:
+        selector = f"{parent.tag}"
+        classes = (parent.attributes.get("class") or "").split()  # type: ignore[attr-defined]
+        ident = parent.attributes.get("id") or ""  # type: ignore[attr-defined]
+        for candidate in _MAIN_SELECTORS:
+            if candidate.startswith("."):
+                if candidate[1:] in classes:
+                    return True
+            elif candidate.startswith("#"):
+                if candidate[1:] == ident:
+                    return True
+            elif selector == candidate:
+                return True
+        parent = parent.parent  # type: ignore[attr-defined]
+    return False
+
+
+def viewer_candidates(html_text: str, base_url: str) -> list[ViewerCandidate]:
+    """Every plausible image URL on a viewer page, best first.
+
+    Advertising is filtered by URL shape; the ranking prefers ``og:image`` /
+    ``twitter:image``, then images inside the main content area, then larger declared
+    sizes, image-CDN hosts and picture-looking paths. GIFs are kept but ranked last
+    (ads are often GIFs, real images occasionally are too).
     """
 
     from selectolax.lexbor import LexborHTMLParser
 
     tree = LexborHTMLParser(html_text or "")
+    found: list[ViewerCandidate] = []
 
-    for selector in ('meta[property="og:image"]', 'meta[name="twitter:image"]'):
+    for selector, source in (
+        ('meta[property="og:image"]', "og"),
+        ('meta[name="twitter:image"]', "twitter"),
+    ):
         node = tree.css_first(selector)
         if node is not None:
             content = (node.attributes.get("content") or "").strip()
             if content:
-                return urljoin(base_url, content)
+                found.append(ViewerCandidate(urljoin(base_url, content), source))
 
-    best: tuple[int, str] | None = None
     for node in tree.css("img"):
-        source = (node.attributes.get("src") or node.attributes.get("data-src") or "").strip()
-        if not source or source.startswith("data:"):
-            continue
-        try:
-            area = int(node.attributes.get("width") or 0) * int(
-                node.attributes.get("height") or 0
+        attributes = node.attributes or {}
+        urls: list[str] = []
+        for attribute in ("src", "data-src"):
+            value = (attributes.get(attribute) or "").strip()
+            if value and not value.startswith("data:"):
+                urls.append(value)
+        srcset = (attributes.get("srcset") or "").strip()
+        if srcset:
+            largest = _srcset_largest(srcset)
+            if largest:
+                urls.append(largest)
+        area = _declared_area(node)
+        in_main = _in_main_area(node)
+        for value in urls:
+            found.append(
+                ViewerCandidate(
+                    url=urljoin(base_url, value),
+                    source="img",
+                    declared_area=area,
+                    in_main=in_main,
+                )
             )
-        except (TypeError, ValueError):
-            area = 0
-        hint = f"{node.attributes.get('class') or ''} {node.attributes.get('id') or ''}".lower()
-        if any(word in hint for word in ("image", "photo", "main")):
-            area += 1_000_000  # a labelled main picture beats an unlabelled one
-        if best is None or area > best[0]:
-            best = (area, source)
-    if best is not None:
-        return urljoin(base_url, best[1])
 
     for node in tree.css("a[href]"):
         href = (node.attributes.get("href") or "").strip()
-        lowered = href.lower().split("?")[0]
-        if lowered.endswith(_VIEWER_IMAGE_SUFFIXES):
-            return urljoin(base_url, href)
-    return None
+        if href.lower().split("?")[0].endswith(_VIEWER_IMAGE_SUFFIXES):
+            found.append(ViewerCandidate(urljoin(base_url, href), "link"))
+
+    ranked: list[tuple[tuple[int, ...], ViewerCandidate]] = []
+    seen: set[str] = set()
+    for candidate in found:
+        if candidate.url in seen:
+            continue
+        seen.add(candidate.url)
+        if _is_ad_url(candidate.url):
+            _log.info("image.viewer_candidate", url=candidate.url, reason_rejected="ad_url")
+            continue
+        host = (urlsplit(candidate.url).hostname or "").lower()
+        path = urlsplit(candidate.url).path.lower()
+        meta_rank = {"og": 2, "twitter": 1}.get(candidate.source, 0)
+        gif_penalty = 0 if not candidate.url.lower().endswith(".gif") else -1
+        rank = (
+            meta_rank,
+            1 if candidate.in_main else 0,
+            candidate.declared_area,
+            1 if _CDN_HOST_RE.search(host) else 0,
+            1 if any(marker in path for marker in _IMAGE_PATH_MARKERS) else 0,
+            gif_penalty,
+        )
+        ranked.append((rank, candidate))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _rank, candidate in ranked]
+
+
+def image_url_from_viewer(html_text: str, base_url: str) -> str | None:
+    """The best single candidate (kept for callers that only need one URL)."""
+
+    candidates = viewer_candidates(html_text, base_url)
+    return candidates[0].url if candidates else None
 
 
 def is_public_ip(value: str) -> bool:
@@ -270,6 +401,8 @@ class ImageFetcher:
             referer=referer,
             resolve_viewer=resolve_viewer,
             depth=0,
+            min_short_side=0,
+            min_bytes=0,
         )
 
     async def _fetch(
@@ -280,6 +413,8 @@ class ImageFetcher:
         referer: str | None,
         resolve_viewer: bool,
         depth: int,
+        min_short_side: int,
+        min_bytes: int,
     ) -> FetchedImage:
         current = url
         headers = {"Referer": referer} if referer else {}
@@ -308,10 +443,10 @@ class ImageFetcher:
                     domain=urlsplit(final_url).hostname,
                     bytes=len(body),
                 )
-                target = image_url_from_viewer(
+                candidates = viewer_candidates(
                     body.decode("utf-8", "replace"), final_url
                 )
-                if not target:
+                if not candidates:
                     _log.warning(
                         "image.viewer_unresolved",
                         domain=urlsplit(final_url).hostname,
@@ -320,19 +455,51 @@ class ImageFetcher:
                     raise ImageFetchError(
                         "bad_content_type", "viewer page had no image URL"
                     )
-                _log.info("image.viewer_resolved", found_url=target)
-                return await self._fetch(
-                    target,
-                    proxy_url=proxy_url,
-                    referer=final_url,
-                    resolve_viewer=False,
-                    depth=depth + 1,
+                for candidate in candidates[:VIEWER_MAX_CANDIDATES]:
+                    try:
+                        image = await self._fetch(
+                            candidate.url,
+                            proxy_url=proxy_url,
+                            referer=final_url,
+                            resolve_viewer=False,
+                            depth=depth + 1,
+                            # A viewer page is full of 300x250 ad slots: a real cover
+                            # has a short side of at least 400px and some substance.
+                            min_short_side=VIEWER_MIN_SHORT_SIDE,
+                            min_bytes=VIEWER_MIN_BYTES,
+                        )
+                    except ImageFetchError as exc:
+                        _log.info(
+                            "image.viewer_candidate",
+                            url=candidate.url,
+                            source=candidate.source,
+                            reason_rejected=exc.code,
+                        )
+                        continue
+                    _log.info(
+                        "image.viewer_resolved",
+                        url=image.final_url,
+                        width=image.width,
+                        height=image.height,
+                        bytes=image.size_bytes,
+                    )
+                    return image
+                _log.warning(
+                    "image.viewer_unresolved",
+                    domain=urlsplit(final_url).hostname,
+                    reason="all_candidates_rejected",
+                    candidates=len(candidates),
+                )
+                raise ImageFetchError(
+                    "bad_content_type", "no usable image on the viewer page"
                 )
             return self._validate_and_store(
                 requested=url,
                 final_url=final_url,
                 content_type=content_type,
                 body=body,
+                min_short_side=min_short_side,
+                min_bytes=min_bytes,
             )
         raise ImageFetchError("too_many_redirects", f"more than {self.max_redirects} redirects")
 
@@ -413,9 +580,15 @@ class ImageFetcher:
         final_url: str,
         content_type: str,
         body: bytes,
+        min_short_side: int = 0,
+        min_bytes: int = 0,
     ) -> FetchedImage:
         if not body:
             raise ImageFetchError("empty", "image body is empty")
+        if min_bytes and len(body) < min_bytes:
+            raise ImageFetchError(
+                "too_small_bytes", f"{len(body)} bytes is below the {min_bytes} minimum"
+            )
 
         try:
             with Image.open(BytesIO(body)) as probe:
@@ -433,6 +606,11 @@ class ImageFetcher:
             raise ImageFetchError("bad_format", f"unsupported image format {image_format!r}")
         if width <= 0 or height <= 0 or width > MAX_DIMENSION or height > MAX_DIMENSION:
             raise ImageFetchError("bad_dimensions", f"unreasonable image size {width}x{height}")
+        if min_short_side and min(width, height) < min_short_side:
+            raise ImageFetchError(
+                "too_small_dimensions",
+                f"{width}x{height} has a short side below {min_short_side}",
+            )
 
         digest = hashlib.sha256(body).hexdigest()
         extension = FORMAT_EXTENSION[image_format]

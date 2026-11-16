@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from app.db.enums import ContentType, CoverStatus
-from app.db.models import Content
+from app.db.enums import AssetRole, ContentType, CoverStatus
+from app.db.models import Asset, Content
 from app.db.session import Database
 from scripts.retry_covers import RetryReport, _DryRunRollbackError, retry_covers
 from sqlalchemy import select
@@ -136,3 +136,67 @@ async def test_updated_at_is_not_touched(db: Database) -> None:
     assert content is not None
     assert content.updated_at == stamp
     assert report.reset == 1
+
+
+# -- --min-cover-dimension: drop 300x250 ad banners ----------------------------
+
+
+async def seed_with_cover(
+    db: Database, key: str, *, width: int, height: int, status: CoverStatus = CoverStatus.READY
+) -> str:
+    content_id = await seed(db, key, status=status, retries=0)
+    async with db.transaction() as session:
+        session.add(
+            Asset(
+                content_id=content_id,
+                provider="Nyaa",
+                role=AssetRole.COVER,
+                original_url=f"https://cdn.example/{key}.jpg",
+                normalized_url=f"https://cdn.example/{key}.jpg",
+                sha256="a" * 64,
+                local_path="/tmp/x.jpg",
+                width=width,
+                height=height,
+                size_bytes=1024,
+                position=0,
+            )
+        )
+    return content_id
+
+
+async def test_small_cover_is_reset_only_with_the_flag(db: Database) -> None:
+    small = await seed_with_cover(db, "fc2_ppv:1", width=300, height=250)
+    big = await seed_with_cover(db, "fc2_ppv:2", width=800, height=600)
+
+    report = RetryReport(dry_run=False)
+    async with db.transaction() as session:
+        await retry_covers(session, report=report)
+    assert report.reset == 0  # nothing to do without the flag
+    assert await state(db, small) == (CoverStatus.READY.value, 0)
+
+    report = RetryReport(dry_run=False)
+    async with db.transaction() as session:
+        await retry_covers(session, min_cover_dimension=400, report=report)
+
+    assert report.reset == 1
+    assert report.rows[0]["canonical_key"] == "fc2_ppv:1"
+    assert report.rows[0]["reason"] == "small_cover"
+    assert await state(db, small) == (CoverStatus.PENDING.value, 0)
+    assert await state(db, big) == (CoverStatus.READY.value, 0)
+
+
+async def test_give_up_and_small_cover_are_counted_once(db: Database) -> None:
+    content_id = await seed_with_cover(
+        db, "fc2_ppv:1", width=300, height=250, status=CoverStatus.GIVE_UP
+    )
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.cover_retry_count = 3
+
+    report = RetryReport(dry_run=False)
+    async with db.transaction() as session:
+        await retry_covers(session, min_cover_dimension=400, report=report)
+
+    assert report.reset == 1
+    assert await state(db, content_id) == (CoverStatus.PENDING.value, 0)
