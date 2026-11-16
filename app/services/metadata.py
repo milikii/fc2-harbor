@@ -32,7 +32,9 @@ from app.providers.coordinator import AggregatedMetadata, MetadataCoordinator, P
 from app.schemas.metadata import ProviderContext
 from app.services.translate import (
     GOOGLE_FREE_ENDPOINT,
+    FallbackTranslator,
     GoogleFreeTranslator,
+    MyMemoryTranslator,
     OpenAITranslator,
     TranslationError,
     Translator,
@@ -366,15 +368,29 @@ def build_translator(settings: Settings) -> Translator | None:
         return None
     if config.provider == "google_free":
         profile = settings.proxy_profile(config.proxy)
-        return GoogleFreeTranslator(
+        proxy_url = None if profile.type == "direct" else profile.url
+        primary = GoogleFreeTranslator(
             target_language=config.target_language,
             source_language=config.source_language,
-            proxy_url=None if profile.type == "direct" else profile.url,
+            proxy_url=proxy_url,
             # The endpoint is fixed: base_url belongs to the OpenAI backend and
             # mixing them is a trap, not a feature.
             endpoint=GOOGLE_FREE_ENDPOINT,
             timeout_seconds=config.timeout_seconds,
         )
+        # Google rate-limits the NAS exit IP (429 / HTML challenge). Do not leave
+        # the card without Chinese text: fall back to MyMemory (deviation §53).
+        fallback = (
+            MyMemoryTranslator(
+                target_language=config.target_language,
+                source_language=config.source_language,
+                proxy_url=proxy_url,
+                timeout_seconds=config.timeout_seconds,
+            )
+            if config.fallback_provider == "mymemory"
+            else None
+        )
+        return FallbackTranslator(primary=primary, fallback=fallback)
     if not (config.base_url and config.api_key and config.model):
         return None
     return OpenAITranslator(

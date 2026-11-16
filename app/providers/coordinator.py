@@ -195,11 +195,12 @@ class MetadataCoordinator:
         a provider reported explicitly always wins; this only fills the gap.
         """
 
+        # Titles only: the seller's description text never decides the tag
+        # (torrentmate rule, docs/deviations.md §52).
         inferred, evidence = infer_censorship(
             {
                 "title": aggregated.title_ja or content.title_ja,
                 "release_title": ctx.release_title,
-                "description": aggregated.description_ja,
             }
         )
         if inferred is None:

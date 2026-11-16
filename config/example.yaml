@@ -173,6 +173,9 @@ translation:
   # one requires base_url + api_key + model and fails fast when enabled without them.
   enabled: true
   provider: google_free
+  # When Google rate-limits this exit IP (429 / challenge page), fall back to the
+  # free MyMemory API instead of shipping a card without Chinese text.
+  fallback_provider: mymemory
   proxy: japan
   target_language: zh-CN
   source_language: ja

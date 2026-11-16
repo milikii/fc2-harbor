@@ -338,7 +338,7 @@ def test_build_translator_wires_the_google_endpoint_and_proxy(
     tmp_path: Path,
 ) -> None:
     from app.services.metadata import build_translator
-    from app.services.translate import GoogleFreeTranslator
+    from app.services.translate import FallbackTranslator, GoogleFreeTranslator
 
     settings = direct_provider_settings(tmp_path)
     settings = settings.model_copy(
@@ -350,7 +350,27 @@ def test_build_translator_wires_the_google_endpoint_and_proxy(
     )
     translator = build_translator(settings)
 
-    assert isinstance(translator, GoogleFreeTranslator)
+    # Google is the primary; MyMemory is the fallback (deviation §53).
+    assert isinstance(translator, FallbackTranslator)
+    assert isinstance(translator._primary, GoogleFreeTranslator)
+
+
+def test_build_translator_can_disable_the_fallback(tmp_path: Path) -> None:
+    from app.services.metadata import build_translator
+    from app.services.translate import FallbackTranslator
+
+    settings = direct_provider_settings(tmp_path)
+    settings = settings.model_copy(
+        update={
+            "translation": settings.translation.model_copy(
+                update={"enabled": True, "proxy": "direct", "fallback_provider": "none"}
+            )
+        }
+    )
+    translator = build_translator(settings)
+
+    assert isinstance(translator, FallbackTranslator)
+    assert translator._fallback is None
 
 
 def test_build_translator_returns_none_when_disabled(tmp_path: Path) -> None:

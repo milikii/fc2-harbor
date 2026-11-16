@@ -689,6 +689,10 @@ class TranslationSection(_FrozenModel):
     model: str | None = None
     target_language: str = "zh-CN"
     source_language: str = "ja"
+    #: When the primary backend is blocked (Google rate-limits the NAS exit IP),
+    #: try MyMemory instead of shipping a card with no Chinese text. ``none``
+    #: disables the fallback.
+    fallback_provider: Literal["mymemory", "none"] = "mymemory"
     timeout_seconds: float = Field(default=30.0, gt=0, le=120)
 
     @model_validator(mode="after")

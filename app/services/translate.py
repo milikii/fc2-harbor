@@ -32,6 +32,13 @@ _log = get_logger("translate")
 #: ``translate.googleapis.com/.../single?client=gtx`` variant is blocked from the
 #: same exit, so it is deliberately not used.
 GOOGLE_FREE_ENDPOINT = "https://clients5.google.com/translate_a/t"
+#: Fallback used when Google refuses us (the NAS exit IP is rate limited).
+MYMEMORY_ENDPOINT = "https://api.mymemory.translated.net/get"
+#: MyMemory accepts roughly 500 characters per ``q`` parameter.
+MYMEMORY_MAX_CHARS = 500
+#: Only this much of the description is translated: the card shows a 250-char
+#: preview anyway, and translating 1600 characters costs time for nothing.
+TRANSLATE_MAX_CHARS = 400
 GOOGLE_FREE_CLIENT = "dict-chrome-ex"
 
 #: URL length is finite: translate in sentence-aligned blocks, several per request.
@@ -368,3 +375,143 @@ class GoogleFreeTranslator:
                 await self._sleep(delay)
         # pragma: no cover - the loop always returns or raises above
         raise last if last is not None else TranslationError("unknown", "translation failed")
+
+
+class MyMemoryTranslator:
+    """Free MyMemory API — the fallback when Google blocks the exit IP.
+
+    ``GET https://api.mymemory.translated.net/get?q=<text>&langpair=ja|zh-CN``
+    answers ``{"responseData": {"translatedText": "…"}, "responseStatus": 200}``.
+    The ``q`` parameter is limited to about 500 characters, so longer text is split
+    on sentence boundaries and joined back in order.
+    """
+
+    def __init__(
+        self,
+        *,
+        target_language: str = "zh-CN",
+        source_language: str = "ja",
+        proxy_url: str | None = None,
+        endpoint: str = MYMEMORY_ENDPOINT,
+        timeout_seconds: float = 20.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._target_language = target_language
+        self._source_language = source_language
+        self._proxy_url = proxy_url
+        self._endpoint = endpoint
+        self._timeout = timeout_seconds
+        self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout),
+                trust_env=False,
+                transport=self._transport,
+                proxy=self._proxy_url or None,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def translate(self, text: str | None) -> str | None:
+        if not text or not text.strip():
+            return None
+        chunks = split_for_translation(
+            text, target=MYMEMORY_MAX_CHARS - 50, hard_max=MYMEMORY_MAX_CHARS
+        )
+        if not chunks:
+            return None
+        translated: list[str] = []
+        for chunk in chunks:
+            translated.append(await self._one(chunk))
+        joined = "".join(translated).strip()
+        if not joined:
+            raise TranslationError("empty", "mymemory returned no text")
+        _log.info("translate.done", provider="mymemory", chunks=len(chunks), chars=len(joined))
+        return joined
+
+    async def _one(self, text: str) -> str:
+        params = {
+            "q": text,
+            "langpair": f"{self._source_language}|{self._target_language}",
+        }
+        try:
+            response = await self.client.get(self._endpoint, params=params)
+        except httpx.HTTPError as exc:
+            raise TranslationError(
+                "network", f"mymemory request failed: {type(exc).__name__}"
+            ) from exc
+        if response.status_code >= 400:
+            raise TranslationError(
+                f"http_{response.status_code}",
+                f"mymemory answered {response.status_code}",
+            )
+        try:
+            payload = response.json()
+            data = payload["responseData"]
+            translated = data["translatedText"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TranslationError("bad_response", "mymemory response is not usable") from exc
+        if not isinstance(translated, str) or not translated.strip():
+            raise TranslationError("empty", "mymemory returned no text")
+        return translated.strip()
+
+
+class FallbackTranslator:
+    """Primary backend, then a fallback, over a truncated input.
+
+    Only the first ``max_chars`` characters are translated: the card shows a short
+    preview, and a 1600-character description would cost seconds for nothing.
+    A ``None`` result from the primary (empty input, already-Chinese text) is final —
+    it is not a failure, so the fallback is not called.
+    """
+
+    def __init__(
+        self,
+        *,
+        primary: Translator,
+        fallback: Translator | None = None,
+        max_chars: int = TRANSLATE_MAX_CHARS,
+    ) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        self._max_chars = max_chars
+
+    async def aclose(self) -> None:
+        await self._primary.aclose()
+        if self._fallback is not None:
+            await self._fallback.aclose()
+
+    async def translate(self, text: str | None) -> str | None:
+        if not text or not text.strip():
+            return None
+        trimmed = text.strip()[: self._max_chars]
+        try:
+            return await self._primary.translate(trimmed)
+        except TranslationError as exc:
+            if self._fallback is None:
+                raise
+            _log.warning(
+                "translate.primary_failed",
+                error_code=exc.code,
+                error_detail=str(exc)[:300],
+                fallback=type(self._fallback).__name__,
+            )
+        try:
+            return await self._fallback.translate(trimmed)
+        except TranslationError as exc:
+            # Both backends failed: the card goes out without Chinese text, and the
+            # caller sees "no translation" rather than an exception.
+            _log.warning(
+                "translate.fallback_failed",
+                error_code=exc.code,
+                error_detail=str(exc)[:300],
+            )
+            return None

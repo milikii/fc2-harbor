@@ -68,6 +68,7 @@ ${EDITOR:-vi} config/config.yaml
 5. **`translation`**：默认 `provider: google_free`（免密钥 Google 端点），只需 `enabled: true` 和 `proxy: japan`——**必须走代理**，直连会超时。不想翻译就 `enabled: false`。
    想用 OpenAI 兼容端点就改成 `provider: openai_compatible` 并配好 `TRANSLATION_BASE_URL/_API_KEY/_MODEL`，缺一个启动就会 fail-fast。
    翻译失败（代理不通、被限流、返回 HTML「Sorry...」页）**不会**影响卡片发送：只记 `metadata.translate_failed`，卡片里没有 `🇨🇳` 那段，日文简介照常显示。
+   Google 被限流时会自动降级到 **MyMemory**（`translation.fallback_provider: mymemory`，设 `none` 关闭）；两者都失败才留空。只翻译前 400 字。
 6. **`provider.sources.*.proxy`**：默认 `japan`。没有日本代理就全改成 `direct`，否则 provider 请求会失败。
 7. **`fc2.code_min_digits` / `code_max_digits`**：FC2 编号位数，默认 5/8，一般不用动。
 8. **`subscription.polling_enabled`**：`false` 时**完全不启动** Nyaa 轮询，只跑手动 Bot（适合先只用手动投递）。

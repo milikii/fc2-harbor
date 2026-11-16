@@ -149,8 +149,12 @@ def test_fc2_absolutises_protocol_relative_images() -> None:
     )
 
 
-def test_fc2_censorship_only_from_explicit_wording() -> None:
-    """Spec 7.3: never infer the tag from a filename or a guess."""
+def test_fc2_censorship_defaults_to_censored_without_a_censor_tag() -> None:
+    """FC2 products are censored unless the official tags say otherwise.
+
+    The seller's description ("この作品は無修正です") is deliberately ignored — the
+    old system's rule, and the reason it never showed "unknown".
+    """
 
     html = (
         '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品">'
@@ -161,7 +165,8 @@ def test_fc2_censorship_only_from_explicit_wording() -> None:
         make_content(),
     )
     assert result is not None
-    assert result.censorship is Censorship.UNCENSORED
+    assert result.censorship is Censorship.CENSORED
+    assert result.raw["censorship_evidence"]["source"] == "default"
 
 
 def test_javlibrary_collects_previews() -> None:
@@ -547,15 +552,19 @@ def test_censorship_reads_the_release_title() -> None:
     assert evidence["matches"][0]["token"] == "【無】"
 
 
-def test_censorship_conflict_becomes_unknown_with_evidence() -> None:
+def test_censorship_conflict_between_title_and_release_title() -> None:
+    """Two contradicting title signals: refuse to pick a winner."""
+
     html_page = (
         '<html><head><meta property="og:title" content="FC2-PPV-1234567 【無】作品">'
-        '<meta name="description" content="説明文です。">'
-        "</head><body><p>この作品は有修正です。</p></body></html>"
+        "</head><body></body></html>"
     )
     result = provider(Fc2Provider).parse(
         ProviderPage(
-            url="https://adult.contents.fc2.com/article/1234567/", html=html_page, status=200
+            url="https://adult.contents.fc2.com/article/1234567/",
+            html=html_page,
+            status=200,
+            release_title="FC2-PPV-1234567 【有】作品",
         ),
         make_content(),
     )
@@ -565,10 +574,10 @@ def test_censorship_conflict_becomes_unknown_with_evidence() -> None:
     evidence = result.raw["censorship_evidence"]
     assert evidence["conflict"] is True
     fields = {item["field"] for item in evidence["matches"]}
-    assert {"title", "page"} <= fields
+    assert {"title", "release_title"} <= fields
 
 
-def test_censorship_evidence_is_recorded_even_when_it_misses() -> None:
+def test_censorship_evidence_records_the_default() -> None:
     html_page = (
         '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品">'
         "</head><body></body></html>"
@@ -581,8 +590,10 @@ def test_censorship_evidence_is_recorded_even_when_it_misses() -> None:
     )
 
     assert result is not None
-    assert result.censorship is None
-    assert result.raw["censorship_evidence"] == {"matches": [], "conflict": False}
+    assert result.censorship is Censorship.CENSORED
+    evidence = result.raw["censorship_evidence"]
+    assert evidence["source"] == "default"
+    assert evidence["tags"] == []
 
 
 @pytest.mark.parametrize(
@@ -691,3 +702,87 @@ def test_nyaa_fallback_ignores_the_default_avatar_as_cover() -> None:
     assert result is not None
     assert result.cover is None
     assert result.previews == []
+
+
+# -- official product tags decide the tag, default is censored -----------------
+
+
+def fc2_page(*, tags: list[str], title: str = "FC2-PPV-1234567 作品") -> ProviderPage:
+    tag_html = "".join(f'<li data-tag="{tag}"></li>' for tag in tags)
+    html = (
+        f'<html><head><meta property="og:title" content="{title}"></head>'
+        f"<body><ul>{tag_html}</ul></body></html>"
+    )
+    return ProviderPage(
+        url="https://adult.contents.fc2.com/article/1234567/", html=html, status=200
+    )
+
+
+def test_fc2_uncensored_comes_from_the_official_tag() -> None:
+    result = provider(Fc2Provider).parse(fc2_page(tags=["無修正", "顔射"]), make_content())
+
+    assert result is not None
+    assert result.censorship is Censorship.UNCENSORED
+    assert result.raw["censorship_evidence"]["source"] == "official_tags"
+    assert result.raw["tags"] == ["無修正", "顔射"]
+
+
+def test_fc2_thin_comes_from_the_official_tag() -> None:
+    for tag in ("薄モザイク", "薄消し"):
+        result = provider(Fc2Provider).parse(fc2_page(tags=[tag]), make_content())
+        assert result is not None
+        assert result.censorship is Censorship.THIN
+
+
+def test_fc2_without_a_censor_tag_defaults_to_censored() -> None:
+    result = provider(Fc2Provider).parse(fc2_page(tags=["顔射", "ごっくん"]), make_content())
+
+    assert result is not None
+    assert result.censorship is Censorship.CENSORED
+    assert result.raw["censorship_evidence"]["source"] == "default"
+    assert result.raw["tags"] == ["顔射", "ごっくん"]
+
+
+def test_fc2_title_bracket_wins_over_the_default() -> None:
+    result = provider(Fc2Provider).parse(
+        fc2_page(tags=["顔射"], title="FC2-PPV-1234567 【無】作品"), make_content()
+    )
+    assert result is not None
+    assert result.censorship is Censorship.UNCENSORED
+    assert result.raw["censorship_evidence"]["source"] == "title"
+
+
+def test_fc2_official_tag_wins_over_the_title() -> None:
+    result = provider(Fc2Provider).parse(
+        fc2_page(tags=["無修正"], title="FC2-PPV-1234567 【有】作品"), make_content()
+    )
+    assert result is not None
+    assert result.censorship is Censorship.UNCENSORED
+
+
+def test_fc2_tags_are_deduplicated_and_entity_decoded() -> None:
+    html = (
+        '<html><head><meta property="og:title" content="FC2-PPV-1234567 作品"></head>'
+        '<body><i data-tag="顔射"></i><i data-tag="顔射"></i>'
+        '<i data-tag="中出し&amp;顔射"></i></body></html>'
+    )
+    result = provider(Fc2Provider).parse(
+        ProviderPage(url="https://adult.contents.fc2.com/article/1234567/", html=html, status=200),
+        make_content(),
+    )
+    assert result is not None
+    assert result.raw["tags"] == ["顔射", "中出し&顔射"]
+
+
+async def test_fc2_removed_page_keeps_unknown() -> None:
+    """A 404 never reaches parse, so no default tag is invented."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="<html>not found</html>")
+
+    client = HttpClient(transport=httpx.MockTransport(handler))
+    adapter = Fc2Provider(client=client, proxy_url=None, timeout_seconds=5)
+    with pytest.raises(ProviderError) as excinfo:
+        await adapter.fetch(make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"))
+    assert excinfo.value.code == "not_found"
+    await client.aclose()

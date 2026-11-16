@@ -310,3 +310,75 @@ async def test_report_explains_the_updated_at_history() -> None:
     notes = report.as_dict()["notes"]
     assert isinstance(notes, list) and notes
     assert any("updated_at" in str(note) for note in notes)
+
+
+# -- official tags decide, and a fetched page defaults to censored -------------
+
+
+async def seed_with_fc2_result(
+    db: Database,
+    *,
+    tags: list[str] | None = None,
+    success: bool = True,
+    title: str | None = None,
+) -> str:
+    content_id = await seed(db, "fc2_ppv:1", title=title)
+    async with db.transaction() as session:
+        session.add(
+            ProviderResult(
+                content_id=content_id,
+                provider="Fc2",
+                success=success,
+                result_json={"raw": {"tags": tags or []}},
+                fetched_at=datetime.now(UTC),
+            )
+        )
+    return content_id
+
+
+async def test_official_tags_decide_the_tag(db: Database) -> None:
+    content_id = await seed_with_fc2_result(db, tags=["無修正", "顔射"])
+    report = RecensorReport(dry_run=False)
+
+    async with db.transaction() as session:
+        await recensor(session, force=False, report=report)
+
+    assert report.changed == 1
+    assert await tag_of(db, content_id) is Censorship.UNCENSORED
+
+
+async def test_a_fetched_page_without_censor_tags_defaults_to_censored(
+    db: Database,
+) -> None:
+    content_id = await seed_with_fc2_result(db, tags=["顔射"])
+    report = RecensorReport(dry_run=False)
+
+    async with db.transaction() as session:
+        await recensor(session, force=False, report=report)
+
+    assert report.changed == 1
+    assert await tag_of(db, content_id) is Censorship.CENSORED
+
+
+async def test_without_a_successful_fetch_only_titles_decide(db: Database) -> None:
+    with_title = await seed(db, "fc2_ppv:1", title="【無】作品")
+    no_evidence = await seed(db, "fc2_ppv:2", title="作品")
+    report = RecensorReport(dry_run=False)
+
+    async with db.transaction() as session:
+        await recensor(session, force=False, report=report)
+
+    assert await tag_of(db, with_title) is Censorship.UNCENSORED
+    # Never guessed: no page, no title evidence.
+    assert await tag_of(db, no_evidence) is Censorship.UNKNOWN
+
+
+async def test_failed_fc2_result_does_not_trigger_the_default(db: Database) -> None:
+    content_id = await seed_with_fc2_result(db, success=False, title="作品")
+    report = RecensorReport(dry_run=False)
+
+    async with db.transaction() as session:
+        await recensor(session, force=False, report=report)
+
+    assert report.changed == 0
+    assert await tag_of(db, content_id) is Censorship.UNKNOWN

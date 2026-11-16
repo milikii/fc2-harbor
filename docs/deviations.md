@@ -434,3 +434,25 @@
   - `_translate` 的缓存判断改成「非空字符串才算缓存」：`if content.description_zh and content.description_zh.strip()`，空串/纯空白是上次失败的残留，必须重翻；写库前同样要求目标为空；
   - 空白描述直接跳过（`not description.strip()`），不再对 `"   "` 发请求；
   - fallback 提供的描述本来就会进入 `aggregated.description_ja`（`_merge` 填空槽），`_translate` 拿到的就是这个值，因此 Nyaa fallback 的描述同样会被翻译。
+
+## 52. 标签改为「官网商品标签 → 标题方括号 → 默认有码」
+
+- 背景：用户旧项目 `milikii/torrentmate` 的规则是只看官网商品标签（`data-tag="…"`），没有码制标签就默认**有码**——所以旧系统从来没有「未知」。我们原来只靠 provider 返回值和标题词表，且把卖家简介也算进去，结果大量 `unknown`。
+- 实现（`app/providers/fc2.py`）：
+  - `_official_tags(html)` 提取 `data-tag="…"`（HTML 实体解码、去重、保序），写进 `raw["tags"]`；
+  - `censorship_from_tags(tags, title, release_title)`：标签含 `無修正` → 无码；含 `薄モザイク` / `薄消し` → 薄码；否则看标题方括号（`【無】`/`【有】`/`【薄】`）；都没有 → **默认有码**；
+  - 证据写进 `raw["censorship_evidence"]`，带 `source`（`official_tags` / `title` / `default`）和 `tags`；
+  - **只有官网页面抓取成功才会走到这里**：404/下架走 `not_found`，不会凭空给默认值；
+  - 卖家简介/页面正文**不再参与**判定（torrentmate 明确「卖家详情文案一律不算」），`infer_censorship` 的调用点只传标题和 release 标题；
+  - `scripts/recensor.py` 对齐同一规则：优先读 `provider_results` 里 Fc2 的 `raw.tags`；没有成功抓取记录时只按标题判定，仍无依据就保持 `unknown`（不猜）。
+- 实测：`adult.contents.fc2.com/article/5008836/` 的 `data-tag` 是 `顔射`、`ごっくん`（无码制标签）→ 判有码。
+
+## 53. 翻译降级：Google 被限流时用 MyMemory
+
+- 背景：NAS 出口 IP 被 Google 限流（429 / HTML challenge），翻译整段丢失；旧系统的做法是「谷歌被挡时自动降到 MyMemory，全失败才留空」。
+- 实现（`app/services/translate.py`）：
+  - `MyMemoryTranslator`：`GET https://api.mymemory.translated.net/get?q=…&langpair=ja|zh-CN`，取 `responseData.translatedText`；`q` 上限约 500 字符，超了按句子边界切块再按序拼接；
+  - `FallbackTranslator`：先 Google，抛 `TranslationError`（429/超时/非 JSON/空）时降级 MyMemory；两者都失败返回 `None`（卡片无中文，照发）；主后端返回 `None`（空输入 / 本来就是中文）视为最终结果，不触发降级；
+  - **只翻译前 400 字**（`TRANSLATE_MAX_CHARS`）：卡片只显示 250 字预览，翻 1600 字纯浪费时间；
+  - 配置 `translation.fallback_provider: mymemory`（默认）/ `none`（关闭）。
+- 实测（经日本代理）：`18歳の新人少女が初撮影に挑戦しました…` → `一位18岁的新人少女挑战了她的首次拍摄。请欣赏她虽然紧张但仍努力表现的样子。`

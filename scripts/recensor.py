@@ -37,6 +37,7 @@ from app.db.enums import Censorship
 from app.db.models import Content, ProviderResult, Release
 from app.db.session import Database, migrate_async
 from app.providers.base import infer_censorship
+from app.providers.fc2 import censorship_from_tags
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,12 +123,20 @@ async def recensor(
         report.scanned += 1
         report.before[label(content.censorship)] += 1
 
-        fields = {
-            "title": content.title_ja,
-            "description": content.description_ja,
-            "release_title": await _release_titles(session, content.id),
-        }
-        verdict, evidence = infer_censorship(fields)
+        release_titles = await _release_titles(session, content.id)
+        tags, fc2_fetched = await _fc2_state(session, content.id)
+        if fc2_fetched:
+            # The official page was fetched once, so the "censored by default" rule
+            # applies exactly as it does in the provider (docs/deviations.md §52).
+            verdict, evidence = censorship_from_tags(
+                tags, content.title_ja, release_titles
+            )
+        else:
+            # No successful official fetch: only explicit wording in the titles.
+            # The seller description never decides the tag.
+            verdict, evidence = infer_censorship(
+                {"title": content.title_ja, "release_title": release_titles}
+            )
 
         if verdict is None:
             report.no_evidence += 1
@@ -163,14 +172,20 @@ async def recensor(
         else:
             report.raw_missing += 1
 
+        matches = evidence.get("matches") or []
+        tokens = {str(item["token"]) for item in matches if isinstance(item, dict)}
+        tokens |= {f"tag:{tag}" for tag in evidence.get("tags") or []}
         report.changes.append(
             {
                 "canonical_key": content.canonical_key,
                 "display_code": content.display_code,
                 "old": old.value,
                 "new": verdict.value,
-                "fields": sorted({str(item["field"]) for item in evidence["matches"]}),
-                "tokens": sorted({str(item["token"]) for item in evidence["matches"]}),
+                "evidence_source": evidence.get("source"),
+                "fields": sorted(
+                    {str(item["field"]) for item in matches if isinstance(item, dict)}
+                ),
+                "tokens": sorted(tokens),
                 "raw_updated": merged,
             }
         )
@@ -189,6 +204,31 @@ async def _release_titles(session: AsyncSession, content_id: str) -> str | None:
     )
     joined = " | ".join(title for title in titles if title)
     return joined or None
+
+
+async def _fc2_state(session: AsyncSession, content_id: str) -> tuple[list[str], bool]:
+    """Official product tags and whether the official page was ever fetched."""
+
+    rows = list(
+        (
+            await session.scalars(
+                select(ProviderResult).where(
+                    ProviderResult.content_id == content_id,
+                    ProviderResult.provider == PREFERRED_PROVIDER,
+                )
+            )
+        ).all()
+    )
+    tags: list[str] = []
+    fetched = False
+    for row in rows:
+        if row.success:
+            fetched = True
+        raw = (row.result_json or {}).get("raw") or {}
+        for tag in raw.get("tags") or []:
+            if isinstance(tag, str) and tag not in tags:
+                tags.append(tag)
+    return tags, fetched
 
 
 async def _merge_evidence(

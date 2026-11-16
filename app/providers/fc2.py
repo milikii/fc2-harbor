@@ -9,9 +9,11 @@ provider with real body text can replace it (docs/deviations.md §34/§35).
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import UTC, datetime
 
+from app.db.enums import Censorship
 from app.db.models import Content
 from app.providers.base import (
     BaseProvider,
@@ -75,15 +77,15 @@ class Fc2Provider(BaseProvider):
         ]
         released = first_attr(tree, ("time[datetime]", "time"), "datetime")
         release_date = _parse_date(released)
-        # The tag is usually only in the title (``【無】`` / ``【有】`` / ``【薄】``),
-        # which the old page-text-only check never saw.
-        censorship, censorship_evidence = infer_censorship(
-            {
-                "title": title,
-                "description": description,
-                "release_title": page.release_title,
-                "page": tree.text(separator=" ", strip=True),
-            }
+        # Censorship: the site's own product tags first (data-tag="…"), then the
+        # bracketed short form in the titles, then "censored" as the FC2 default —
+        # this is what the user's old system did, and why it never showed "unknown".
+        # The page was fetched successfully, so the default is a statement, not a
+        # guess; a removed article never reaches this code (it 404s).
+        # Seller description text is deliberately never used (torrentmate rule).
+        official_tags = _official_tags(page.html)
+        censorship, censorship_evidence = censorship_from_tags(
+            official_tags, title, page.release_title
         )
 
         return self._result(
@@ -103,8 +105,50 @@ class Fc2Provider(BaseProvider):
                 "description_source": description_source,
                 # Which wording produced the tag, and from which field.
                 "censorship_evidence": censorship_evidence,
+                # The site's own product tags, for later re-scoring without HTTP.
+                "tags": official_tags,
             },
         )
+
+
+#: The site marks each product tag as ``data-tag="…"``.
+_TAG_RE = re.compile(r'data-tag="([^"]+)"', re.IGNORECASE)
+
+
+def _official_tags(html_text: str) -> list[str]:
+    """The product tags shown on the article page (deduplicated, entity-decoded)."""
+
+    seen: set[str] = set()
+    tags: list[str] = []
+    for raw in _TAG_RE.findall(html_text or ""):
+        tag = html.unescape(raw).strip()
+        if tag and tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+    return tags
+
+
+def censorship_from_tags(
+    tags: list[str], title: str | None, release_title: str | None
+) -> tuple[Censorship, dict[str, object]]:
+    """Official tags → bracketed title forms → "censored" as the FC2 default."""
+
+    tag_text = " ".join(tags)
+    if "無修正" in tag_text:
+        return Censorship.UNCENSORED, {"source": "official_tags", "tags": tags}
+    if "薄モザイク" in tag_text or "薄消し" in tag_text:
+        return Censorship.THIN, {"source": "official_tags", "tags": tags}
+
+    inferred, evidence = infer_censorship({"title": title, "release_title": release_title})
+    if inferred is not None:
+        evidence = {**evidence, "source": "title"}
+        return inferred, evidence
+
+    return Censorship.CENSORED, {
+        "source": "default",
+        "tags": tags,
+        "reason": "FC2 products are censored unless the official tags say otherwise",
+    }
 
 
 def _strip_code_prefix(title: str) -> str:
