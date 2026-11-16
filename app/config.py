@@ -675,7 +675,10 @@ class ImageFetchSection(_FrozenModel):
 
 
 class TranslationSection(_FrozenModel):
-    enabled: bool = False
+    #: On by default: ``google_free`` needs no key, and a failed translation only
+    #: logs and leaves the card without Chinese text. Off means the card never has
+    #: a translation at all, which is the worse default.
+    enabled: bool = True
     #: ``google_free`` is the key-less Google endpoint (needs a proxy from this
     #: host); ``openai_compatible`` needs base_url + api_key + model.
     provider: Literal["google_free", "openai_compatible"] = "google_free"

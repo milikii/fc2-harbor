@@ -33,7 +33,12 @@ from app.logging import error_detail, get_logger
 from app.network.clients import HttpClient
 from app.network.proxy import ProxyRouter
 from app.providers.avsox import AvsoxProvider
-from app.providers.base import BaseProvider, ProviderError, ProviderPage
+from app.providers.base import (
+    BaseProvider,
+    ProviderError,
+    ProviderPage,
+    infer_censorship,
+)
 from app.providers.custom import build_custom_providers
 from app.providers.fc2 import Fc2Provider
 from app.providers.fc2_hub import Fc2HubProvider
@@ -175,8 +180,49 @@ class MetadataCoordinator:
         if self.nyaa_fallback is not None and needs_fallback:
             await self._run_fallback(content, ctx, aggregated, limit)
 
+        self._apply_censorship_title_fallback(content, ctx, aggregated)
+
         aggregated.previews = aggregated.previews[:limit]
         return aggregated
+
+    def _apply_censorship_title_fallback(
+        self, content: Content, ctx: ProviderContext, aggregated: AggregatedMetadata
+    ) -> None:
+        """Fill an UNKNOWN tag from the titles we already have.
+
+        No provider returns a censorship field for FC2 content, so without this the
+        tag stayed UNKNOWN forever even when the Nyaa title said ``【無】``. A value
+        a provider reported explicitly always wins; this only fills the gap.
+        """
+
+        inferred, evidence = infer_censorship(
+            {
+                "title": aggregated.title_ja or content.title_ja,
+                "release_title": ctx.release_title,
+                "description": aggregated.description_ja,
+            }
+        )
+        if inferred is None:
+            return
+        if aggregated.censorship is Censorship.UNKNOWN:
+            aggregated.censorship = inferred
+            aggregated.sources["censorship"] = "title_fallback"
+            _log.info(
+                "metadata.censorship_title_fallback",
+                canonical_key=content.canonical_key,
+                censorship=inferred.value,
+                evidence=evidence,
+            )
+            return
+        if aggregated.censorship is not inferred:
+            # Never override an explicit provider value; just record the disagreement.
+            _log.warning(
+                "metadata.censorship_conflict",
+                canonical_key=content.canonical_key,
+                provider_value=aggregated.censorship.value,
+                title_value=inferred.value,
+                source=aggregated.sources.get("censorship"),
+            )
 
     def _description_is_good_enough(self, aggregated: AggregatedMetadata) -> bool:
         """Early stop is only allowed once the description is not just a teaser."""

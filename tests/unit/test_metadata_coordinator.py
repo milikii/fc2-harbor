@@ -476,3 +476,58 @@ async def test_seek_full_description_keeps_looking_past_a_summary(tmp_path: Path
     assert second.calls == 1
     assert aggregated.description_ja == "完整正文"
     assert aggregated.description_quality == "full"
+
+
+# -- censorship from the titles we already have -------------------------------
+
+
+async def test_title_fallback_fills_an_unknown_censorship(tmp_path: Path) -> None:
+    """No provider reports the tag; the Nyaa title carries 【無】."""
+
+    a = FakeProvider("A", result=result("A", title="FC2-PPV-1234567 作品"))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(),
+        ProviderContext(
+            canonical_key="fc2_ppv:1234567",
+            release_title="FC2-PPV-1234567 【無】作品",
+        ),
+        min_previews=0,
+    )
+
+    assert aggregated.censorship is Censorship.UNCENSORED
+    assert aggregated.sources["censorship"] == "title_fallback"
+
+
+async def test_title_fallback_uses_the_content_title_too(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="【有】作品"))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "title_fallback"
+
+
+async def test_provider_value_wins_over_the_title(tmp_path: Path) -> None:
+    a = FakeProvider(
+        "A",
+        result=result("A", title="FC2-PPV-1234567 【無】作品", censorship=Censorship.CENSORED),
+    )
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(),
+        ProviderContext(canonical_key="fc2_ppv:1234567"),
+        min_previews=0,
+    )
+
+    assert aggregated.censorship is Censorship.CENSORED
+    assert aggregated.sources["censorship"] == "A"
+
+
+async def test_no_evidence_anywhere_stays_unknown(tmp_path: Path) -> None:
+    a = FakeProvider("A", result=result("A", title="FC2-PPV-1234567 作品"))
+    aggregated = await coordinator(a, settings=make_settings(tmp_path)).aggregate(
+        make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"), min_previews=0
+    )
+
+    assert aggregated.censorship is Censorship.UNKNOWN
+    assert "censorship" not in aggregated.sources

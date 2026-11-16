@@ -415,3 +415,22 @@
 - 背景：`publisher.require_cover` 会把重试超限的内容标 `give_up` 并永久跳过；Nyaa fallback 修好后这些内容本可以出卡。
 - 实现：把 `cover_status='give_up'` 重置为 `pending`、`cover_retry_count=0`，只动这两列（`updated_at` 钉住不动，见 §42）。支持 `--dry-run`、`--since DAYS`（按 `created_at` 过滤——`updated_at` 曾被污染过，不适合做时间依据）、`--only CANONICAL_KEY`；幂等（第二次 `reset=0`）；报告 `retry-covers-report.json`。
 - 推送队列的配合：SQL 只排除 `cover_status='give_up'`，`pending` / `pending_cover` 仍留在队列里，这样 publisher 每轮才有机会重试。
+
+## 50. 标签：聚合结束后用标题兜底
+
+- 问题：`_merge` 只在 `result.censorship is not None` 时采用 provider 的值，而 9 个 provider 对 FC2 内容**一个都不返回 censorship**（`nyaa_fallback` 也从不设），所以标签永远是 `UNKNOWN`——即使 Nyaa 标题里写着 `【無】`。
+- 实现（`app/providers/coordinator.py::_apply_censorship_title_fallback`，在聚合结束、`previews` 截断前调用）：
+  - 用 `aggregated.title_ja`（或 `content.title_ja`）+ `ctx.release_title`（触发这次查询的 Nyaa 标题）+ `aggregated.description_ja` 跑 `infer_censorship`；
+  - **只在 `aggregated.censorship is UNKNOWN` 时填充**，`sources["censorship"] = "title_fallback"`，日志 `metadata.censorship_title_fallback`（带 evidence）；
+  - provider 明确给过值就绝不覆盖；与标题推断不一致时只记 `metadata.censorship_conflict`（含两边的值），保留 provider 的值。
+- 用 `ctx.release_title` 而不是查全部 releases：协调器不做数据库访问（分层约束），而触发查询的那条 release 就是标题里带标签的那条。
+
+## 51. 翻译默认开启 + 缓存判断收紧
+
+- 问题：`TranslationSection.enabled` 默认 `False`，生产配置一旦没显式写 `true`（或模板合并冲掉），翻译完全不调用——这是「卡片没有中文」最直接的原因。
+- 实现：
+  - 默认值改 `True`（`google_free` 免密钥，失败只记日志、不影响卡片，默认关没有理由）；
+  - `main.py` 启动打 `translation.configured {enabled, provider, proxy, available}`，一眼能看出翻译有没有装配上；
+  - `_translate` 的缓存判断改成「非空字符串才算缓存」：`if content.description_zh and content.description_zh.strip()`，空串/纯空白是上次失败的残留，必须重翻；写库前同样要求目标为空；
+  - 空白描述直接跳过（`not description.strip()`），不再对 `"   "` 发请求；
+  - fallback 提供的描述本来就会进入 `aggregated.description_ja`（`_merge` 填空槽），`_translate` 拿到的就是这个值，因此 Nyaa fallback 的描述同样会被翻译。

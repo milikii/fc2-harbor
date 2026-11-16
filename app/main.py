@@ -147,6 +147,16 @@ async def run(settings: Settings) -> None:
             user_agent=settings.nyaa.user_agent,
         )
         translator = build_translator(settings)
+        # Say it out loud: "no Chinese text on the cards" is almost always this flag.
+        _log.info(
+            "translation.configured",
+            enabled=settings.translation.enabled,
+            provider=settings.translation.provider,
+            proxy=settings.translation.proxy
+            if settings.translation.provider == "google_free"
+            else None,
+            available=translator is not None,
+        )
         metadata_service = MetadataService(
             db=db,
             coordinator=coordinator,

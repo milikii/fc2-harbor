@@ -361,3 +361,128 @@ def test_build_translator_returns_none_when_disabled(tmp_path: Path) -> None:
         update={"translation": settings.translation.model_copy(update={"enabled": False})}
     )
     assert build_translator(settings) is None
+
+
+# -- translation wiring -------------------------------------------------------
+
+
+class _CountingTranslator:
+    def __init__(self, value: str = "中文译文") -> None:
+        self.calls: list[str] = []
+        self.value = value
+
+    async def translate(self, text: str | None) -> str | None:
+        self.calls.append(text or "")
+        return self.value
+
+    async def aclose(self) -> None:
+        return None
+
+
+def service_with(
+    db: Database, settings: Settings, tmp_path: Path, translator: object
+) -> MetadataService:
+    service = build_service(db, settings, tmp_path)
+    service.translator = translator  # type: ignore[assignment]
+    return service
+
+
+async def test_translation_runs_for_a_present_description(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    translator = _CountingTranslator()
+    service = service_with(db, settings, tmp_path, translator)
+
+    translated = await service._translate(content_id, "作品の説明です。")
+
+    assert translator.calls == ["作品の説明です。"]
+    assert translated == "中文译文"
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.description_zh == "中文译文"
+
+
+async def test_translation_is_skipped_when_there_is_no_description(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    translator = _CountingTranslator()
+    service = service_with(db, settings, tmp_path, translator)
+
+    assert await service._translate(content_id, None) is None
+    assert await service._translate(content_id, "   ") is None
+    assert translator.calls == []
+
+
+async def test_translation_is_skipped_when_disabled(db: Database, tmp_path: Path) -> None:
+    from app.services.metadata import build_translator
+
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    settings = settings.model_copy(
+        update={"translation": settings.translation.model_copy(update={"enabled": False})}
+    )
+    assert build_translator(settings) is None
+
+    service = service_with(db, settings, tmp_path, None)
+    assert await service._translate(content_id, "作品の説明です。") is None
+
+
+async def test_cached_translation_is_reused(db: Database, tmp_path: Path) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_zh = "已有译文"
+
+    translator = _CountingTranslator("新しい訳")
+    service = service_with(db, settings, tmp_path, translator)
+
+    assert await service._translate(content_id, "説明") == "已有译文"
+    assert translator.calls == []
+
+
+async def test_empty_string_residue_is_retranslated(db: Database, tmp_path: Path) -> None:
+    """A previous failure may have left ``''``; that is not a cache hit."""
+
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_zh = ""
+
+    translator = _CountingTranslator("重新翻译")
+    service = service_with(db, settings, tmp_path, translator)
+
+    assert await service._translate(content_id, "説明") == "重新翻译"
+    assert translator.calls == ["説明"]
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.description_zh == "重新翻译"
+
+
+async def test_fallback_description_reaches_the_translator(
+    db: Database, tmp_path: Path
+) -> None:
+    """A description that only the Nyaa fallback supplied must still be translated."""
+
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    translator = _CountingTranslator("回退译文")
+    service = service_with(db, settings, tmp_path, translator)
+
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_zh = None
+
+    translated = await service._translate(content_id, "フォールバックの説明")
+    assert translator.calls == ["フォールバックの説明"]
+    assert translated == "回退译文"

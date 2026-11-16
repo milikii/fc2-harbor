@@ -330,12 +330,17 @@ class MetadataService:
     # -- translation --------------------------------------------------------
 
     async def _translate(self, content_id: str, description: str | None) -> str | None:
-        if self.translator is None or not description:
+        if self.translator is None or not description or not description.strip():
             return None
         async with self.db.session() as session:
             content = await session.get(Content, content_id)
-            if content is None or content.description_zh:
-                return content.description_zh if content else None
+            if content is None:
+                return None
+            # Only a *real* translation counts as cached. An empty string is the
+            # residue of an earlier failure and must be retried, so this is an
+            # explicit "non-empty" check, never `is None`.
+            if content.description_zh and content.description_zh.strip():
+                return content.description_zh
         try:
             translated = await self.translator.translate(description)
         except TranslationError as exc:
@@ -347,7 +352,7 @@ class MetadataService:
             return None
         async with self.db.transaction() as session:
             content = await session.get(Content, content_id)
-            if content is not None and not content.description_zh:
+            if content is not None and not (content.description_zh or "").strip():
                 content.description_zh = translated
                 content.updated_at = utcnow()
         return translated
