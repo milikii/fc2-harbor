@@ -34,6 +34,10 @@ from sqlalchemy import func, select
 
 from tests.support import make_settings
 
+#: Long enough to pass the "is this a real description?" filter (>= 20 chars).
+SAMPLE_JA = "素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。"
+FALLBACK_JA = "フォールバックが提供した説明文です。十分に長い文章になっています。"
+
 HASH = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -71,7 +75,7 @@ def result(*, previews: list[str]) -> MetadataResult:
         provider="Fc2",
         content_key="fc2_ppv:1234567",
         title_ja="FC2-PPV-1234567 タイトル",
-        description_ja="作品の説明です。",
+        description_ja=SAMPLE_JA,
         official_url="https://adult.contents.fc2.com/article/1234567/",
         censorship=Censorship.UNCENSORED,
         release_date=datetime(2020, 11, 1, tzinfo=UTC),
@@ -203,7 +207,7 @@ async def test_enrich_persists_metadata_assets_and_translation(
         content = await session.get(Content, content_id)
         assert content is not None
         assert content.title_ja == "FC2-PPV-1234567 タイトル"
-        assert content.description_ja == "作品の説明です。"
+        assert content.description_ja == SAMPLE_JA
         assert content.description_zh == "中文译文"
         assert content.official_url == "https://adult.contents.fc2.com/article/1234567/"
         assert content.censorship is Censorship.UNCENSORED
@@ -330,7 +334,7 @@ async def test_translation_failure_leaves_description_empty(
     async with db.session() as session:
         content = await session.get(Content, content_id)
         assert content is not None
-        assert content.description_ja == "作品の説明です。"
+        assert content.description_ja == SAMPLE_JA
         assert content.description_zh is None
 
 
@@ -415,9 +419,9 @@ async def test_translation_runs_for_a_present_description(
     translator = _CountingTranslator()
     service = service_with(db, settings, tmp_path, translator)
 
-    translated = await service._translate(content_id, "作品の説明です。")
+    translated = await service._translate(content_id, SAMPLE_JA)
 
-    assert translator.calls == ["作品の説明です。"]
+    assert translator.calls == [SAMPLE_JA]
     assert translated == "中文译文"
     async with db.session() as session:
         content = await session.get(Content, content_id)
@@ -449,7 +453,7 @@ async def test_translation_is_skipped_when_disabled(db: Database, tmp_path: Path
     assert build_translator(settings) is None
 
     service = service_with(db, settings, tmp_path, None)
-    assert await service._translate(content_id, "作品の説明です。") is None
+    assert await service._translate(content_id, SAMPLE_JA) is None
 
 
 async def test_cached_translation_is_reused(db: Database, tmp_path: Path) -> None:
@@ -463,7 +467,7 @@ async def test_cached_translation_is_reused(db: Database, tmp_path: Path) -> Non
     translator = _CountingTranslator("新しい訳")
     service = service_with(db, settings, tmp_path, translator)
 
-    assert await service._translate(content_id, "説明") == "已有译文"
+    assert await service._translate(content_id, SAMPLE_JA) == "已有译文"
     assert translator.calls == []
 
 
@@ -480,8 +484,8 @@ async def test_empty_string_residue_is_retranslated(db: Database, tmp_path: Path
     translator = _CountingTranslator("重新翻译")
     service = service_with(db, settings, tmp_path, translator)
 
-    assert await service._translate(content_id, "説明") == "重新翻译"
-    assert translator.calls == ["説明"]
+    assert await service._translate(content_id, SAMPLE_JA) == "重新翻译"
+    assert translator.calls == [SAMPLE_JA]
     async with db.session() as session:
         content = await session.get(Content, content_id)
     assert content is not None
@@ -503,8 +507,10 @@ async def test_fallback_description_reaches_the_translator(
         assert content is not None
         content.description_zh = None
 
-    translated = await service._translate(content_id, "フォールバックの説明")
-    assert translator.calls == ["フォールバックの説明"]
+    translated = await service._translate(
+        content_id, FALLBACK_JA
+    )
+    assert translator.calls == [FALLBACK_JA]
     assert translated == "回退译文"
 
 
@@ -542,3 +548,40 @@ async def test_viewer_resolution_is_only_enabled_for_nyaa_images(
 
     assert recorder.calls[0]["resolve_viewer"] is True
     assert recorder.calls[1]["resolve_viewer"] is False
+
+
+# -- only the official description is translated ------------------------------
+
+
+async def test_a_url_only_description_is_not_translated(
+    db: Database, tmp_path: Path
+) -> None:
+    """No point spending a request on a bare image URL."""
+
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    translator = _CountingTranslator()
+    service = service_with(db, settings, tmp_path, translator)
+
+    translated = await service._translate(
+        content_id, "https://imagetwist.com/367wmg0gouoq/grewag.png"
+    )
+
+    assert translated is None
+    assert translator.calls == []
+
+
+async def test_a_promotional_description_is_not_translated(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    translator = _CountingTranslator()
+    service = service_with(db, settings, tmp_path, translator)
+
+    translated = await service._translate(
+        content_id, "★ 特価★★ 3960pt→1980pt 期間限定キャンペーン実施中です。"
+    )
+
+    assert translated is None
+    assert translator.calls == []

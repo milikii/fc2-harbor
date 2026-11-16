@@ -38,6 +38,25 @@ META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
 META_SIZE_ONLY_TEMPLATE = "💾 {size}"
 META_TIME_ONLY_TEMPLATE = "🕒 {published}"
 DESCRIPTION_PREFIX = "📝 "
+#: A description made mostly of links, or carrying seller promotion, is not a plot.
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_PROMO_MARKERS = (
+    "请关注",
+    "請關注",
+    "官方频道",
+    "官方頻道",
+    "不定期更新",
+    "ランキング",
+    "高画質版",
+    "高畫質版",
+    "特価",
+    "特价",
+    "pt→",
+    "ご登録",
+    "フォロー",
+)
+#: Below this much non-link text there is nothing to show.
+MIN_DESCRIPTION_CHARS = 20
 LINK_TEMPLATE = '<a href="{url}">nyaa</a>'
 TIME_FORMAT = "%Y-%m-%d %H:%M"
 
@@ -155,6 +174,28 @@ def clean_card_title(card: CardSource, *, limit: int | None = None) -> str:
     return truncate(text, limit) if limit else text
 
 
+def usable_description(text: str | None) -> str | None:
+    """The description only if it reads like a plot, not links or an ad.
+
+    Nyaa posts are often a pile of image URLs or a seller's promotion ("join my
+    channel", "half price"); the old system never showed those, and neither do we.
+    """
+
+    value = clean_description(text)
+    if value is None:
+        return None
+    lowered = value.lower()
+    if any(marker in lowered for marker in _PROMO_MARKERS):
+        return None
+    without_links = _URL_RE.sub("", value)
+    link_chars = len(value) - len(without_links)
+    if link_chars and link_chars / max(len(value), 1) > 0.3:
+        return None
+    if len(" ".join(without_links.split())) < MIN_DESCRIPTION_CHARS:
+        return None
+    return value
+
+
 def clean_description(text: str | None, *, limit: int | None = None) -> str | None:
     if not text:
         return None
@@ -238,10 +279,11 @@ def compact_caption(card: CardSource) -> str:
 def card_text(card: CardSource) -> str | None:
     """What the ``📝`` line shows: the Chinese translation, else the Japanese text.
 
-    The old system printed one block, never both, which keeps the card short.
+    The old system printed one block, never both, and it never showed the Nyaa
+    seller's post — the publisher only puts the official FC2 description here.
     """
 
-    return card.description_zh or card.description_ja
+    return usable_description(card.description_zh) or usable_description(card.description_ja)
 
 
 def description_messages(card: CardSource) -> tuple[str, ...]:

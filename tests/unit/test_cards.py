@@ -47,8 +47,8 @@ def card(**overrides: object) -> CardSource:
         "canonical_key": "fc2_ppv:1234567",
         "display_code": "FC2-PPV-1234567",
         "title": "サンプル作品タイトル",
-        "description_ja": "短い説明。",
-        "description_zh": "简短说明。",
+        "description_ja": "素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。",
+        "description_zh": "素人首次拍摄。19岁的大学生第一次挑战拍摄工作。",
         "censorship": Censorship.UNCENSORED,
         "nyaa_url": "https://sukebei.nyaa.si/view/4761220",
         "official_url": "https://adult.contents.fc2.com/article/1234567/",
@@ -72,7 +72,7 @@ def test_card_layout_matches_the_legacy_template() -> None:
         "サンプル作品タイトル\n"
         "💾 3.72 GiB · 🕒 2025-11-15 03:01\n"
         "\n"
-        "📝 简短说明。\n"
+        "📝 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。\n"
         '<a href="https://sukebei.nyaa.si/view/4761220">nyaa</a>'
     )
 
@@ -120,7 +120,7 @@ def test_link_renders_as_anchor_text() -> None:
 def test_missing_link_drops_the_line() -> None:
     caption = build_card_messages(card(nyaa_url="")).caption
     assert "<a href" not in caption
-    assert caption.endswith("📝 简短说明。")
+    assert caption.endswith("📝 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。")
 
 
 def test_naive_timestamp_is_read_as_utc() -> None:
@@ -159,7 +159,10 @@ def test_title_markup_is_escaped() -> None:
 
 def test_description_markup_is_escaped() -> None:
     caption = build_card_messages(
-        card(description_ja="<i>あ</i> & 説明", description_zh="<u>译文</u> & 内容")
+        card(
+            description_ja="<i>あ</i> & 説明です。とても長い説明文がここに続きます。",
+            description_zh="<u>译文</u> & 内容，这是一段足够长的中文说明文字。",
+        )
     ).caption
     # The translation wins (one 📝 block) and its markup is escaped.
     assert "<u>" not in caption
@@ -176,11 +179,15 @@ def test_url_in_the_anchor_is_escaped() -> None:
 def test_escaped_description_still_goes_out_escaped() -> None:
     long_url = "https://sukebei.nyaa.si/view/" + "9" * 900
     messages = build_card_messages(
-        card(description_ja="<b>あ</b> 説明", description_zh=None, nyaa_url=long_url)
+        card(
+            description_ja="<b>あ</b> 説明です。とても長い説明文がここに続きます。",
+            description_zh=None,
+            nyaa_url=long_url,
+        )
     )
     assert messages.has_overflow is True
     assert all("<b>" not in text for text in messages.extra_texts)
-    assert messages.extra_texts[0] == "📝 &lt;b&gt;あ&lt;/b&gt; 説明"
+    assert messages.extra_texts[0].startswith("📝 &lt;b&gt;あ&lt;/b&gt; 説明です。")
 
 
 # -- truncation --------------------------------------------------------------
@@ -238,9 +245,12 @@ def test_caption_title_is_truncated_when_it_does_not_fit() -> None:
 
 def test_whitespace_is_collapsed_in_the_description() -> None:
     caption = build_card_messages(
-        card(description_ja="一行目\n\n二行目   三行目", description_zh=None)
+        card(
+            description_ja="一行目の説明です。\n\n二行目   三行目の説明が続きます。",
+            description_zh=None,
+        )
     ).caption
-    assert "📝 一行目 二行目 三行目" in caption
+    assert "📝 一行目の説明です。 二行目 三行目の説明が続きます。" in caption
 
 
 def test_truncate_and_collapse_helpers() -> None:
@@ -277,15 +287,20 @@ def test_overflow_sends_one_complete_body_message() -> None:
 
 def test_chinese_translation_wins_over_the_japanese_text() -> None:
     messages = build_card_messages(
-        card(description_ja="日本語の説明", description_zh="这是中文翻译。")
+        card(
+            description_ja="日本語の説明です。これは十分に長い説明文です。",
+            description_zh="这是中文翻译，足够长的一段说明文字，用来通过长度门槛。",
+        )
     )
-    assert "📝 这是中文翻译。" in messages.caption
+    assert "📝 这是中文翻译，足够长的一段说明文字，用来通过长度门槛。" in messages.caption
     assert "日本語の説明" not in messages.caption
 
 
 def test_japanese_is_used_when_there_is_no_translation() -> None:
-    messages = build_card_messages(card(description_ja="日本語だけ。", description_zh=None))
-    assert "📝 日本語だけ。" in messages.caption
+    messages = build_card_messages(
+        card(description_ja="日本語だけの説明です。これは十分に長い文章です。", description_zh=None)
+    )
+    assert "📝 日本語だけの説明です。" in messages.caption
     assert "🇨🇳" not in messages.caption
 
 
@@ -455,3 +470,48 @@ def test_the_description_is_truncated_to_two_hundred_fifty_characters() -> None:
 def test_the_size_falls_back_to_a_dash() -> None:
     caption = build_card_messages(card(size_text=None)).caption
     assert "💾 - · 🕒" in caption
+
+
+# -- 📝 junk filter ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://imagetwist.com/367wmg0gouoq/grewag.png",
+        "https://a.com/1.jpg https://a.com/2.jpg https://a.com/3.jpg",
+        "大家好，这里是【人渣崩坏】官方频道↓请在此加载我们会不定期更新信息",
+        "★ 特価★★ 3960pt→1980pt",
+        "高画質版はこちらからどうぞ、ぜひご登録ください。",
+        "短い。",
+    ],
+)
+def test_junk_descriptions_are_dropped(text: str) -> None:
+    from app.services.cards import usable_description
+
+    assert usable_description(text) is None
+
+
+def test_a_real_description_survives_the_filter() -> None:
+    from app.services.cards import usable_description
+
+    text = "素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。"
+    assert usable_description(text) == text
+
+
+def test_the_card_omits_a_junk_description() -> None:
+    messages = build_card_messages(
+        card(description_ja="https://imagetwist.com/367wmg0gouoq/grewag.png", description_zh=None)
+    )
+    assert "📝" not in messages.caption
+    assert "imagetwist" not in messages.caption
+
+
+def test_a_short_title_is_never_truncated() -> None:
+    """A 46-character title stays 46: only >200 characters are cut."""
+
+    short = "極秘映像七沢あ" + "い" * 39
+    assert len(short) == 46
+    caption = build_card_messages(card(title=short, description_zh=None)).caption
+    assert caption.splitlines()[3] == short
+    assert "…" not in caption.splitlines()[3]

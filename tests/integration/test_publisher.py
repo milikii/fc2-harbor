@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from app.config import Settings
 from app.db.enums import AssetRole, ContentType, CoverStatus, NotificationStatus
-from app.db.models import Asset, Content, Notification, Release
+from app.db.models import Asset, Content, Notification, ProviderResult, Release
 from app.db.session import Database
 from app.network.image_fetcher import ImageFetcher
 from app.network.proxy import ProxyRouter
@@ -95,12 +95,23 @@ async def seed(db: Database, tmp_path: Path, *, previews: int = 2, cover: bool =
             canonical_key="fc2_ppv:1234567",
             display_code="FC2-PPV-1234567",
             title_ja="サンプル作品",
-            description_ja="作品の説明です。",
-            description_zh="作品说明。",
+            description_ja="作品の説明です。これは十分に長い説明文で、実際のカードに表示されます。",
+            description_zh="作品说明，这是一段足够长的中文介绍，用来通过长度门槛。",
             official_url="https://adult.contents.fc2.com/article/1234567/",
         )
         session.add(content)
         await session.flush()
+        # The card's 📝 line only shows the FC2 provider's description, so every
+        # seeded content needs that row (deviation §58).
+        session.add(
+            ProviderResult(
+                content_id=content.id,
+                provider="Fc2",
+                success=True,
+                result_json={"description_ja": content.description_ja},
+                fetched_at=datetime.now(UTC),
+            )
+        )
         session.add(
             Release(
                 content_id=content.id,
@@ -142,6 +153,25 @@ def _asset(content_id: str, role: AssetRole, position: int, tmp_path: Path, *, s
     )
 
 
+async def set_descriptions(
+    db: Database, content_id: str, *, ja: str | None, zh: str | None
+) -> None:
+    """Update both the content row and the Fc2 result the card reads."""
+
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_ja = ja
+        content.description_zh = zh
+        result = await session.scalar(
+            select(ProviderResult).where(
+                ProviderResult.content_id == content_id, ProviderResult.provider == "Fc2"
+            )
+        )
+        assert result is not None
+        result.result_json = {"description_ja": ja}
+
+
 def build_publisher(db: Database, settings: Settings, bot: FakeBot, tmp_path: Path) -> Publisher:
     coordinator = MetadataCoordinator(providers=[], settings=settings)
     fetcher = ImageFetcher(cache_dir=tmp_path / "cache", allowed_hosts=["img.example.com"])
@@ -179,7 +209,7 @@ async def test_card_with_cover_and_previews(db: Database, tmp_path: Path) -> Non
     assert chat_id == settings.telegram.allowed_user_ids[0]
     assert caption and "FC2-PPV-1234567" in caption
     # One 📝 block: the Chinese translation wins over the Japanese text.
-    assert caption and "📝 作品说明。" in caption
+    assert caption and "📝 作品说明，这是一段足够长的中文介绍，用来通过长度门槛。" in caption
     assert len(bot.groups) == 1
     assert len(bot.groups[0][1]) == 2
 
@@ -262,8 +292,7 @@ async def test_long_content_truncates_the_caption_and_sends_the_full_text(
         content = await session.get(Content, content_id)
         assert content is not None
         content.title_ja = "題" * 1000
-        content.description_ja = "あ" * 2000
-        content.description_zh = "中" * 2000
+    await set_descriptions(db, content_id, ja="あ" * 2000, zh="中" * 2000)
 
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
@@ -550,8 +579,12 @@ async def test_markup_in_content_is_escaped_before_sending(
         content = await session.get(Content, content_id)
         assert content is not None
         content.title_ja = "タイトル <b>強調</b> & 100%"
-        content.description_ja = "説明 <i>斜体</i> & 記号"
-        content.description_zh = "翻译 <u>下划线</u> & 符号"
+    await set_descriptions(
+        db,
+        content_id,
+        ja="説明 <i>斜体</i> & 記号がここに続きます。十分に長い文章です。",
+        zh="翻译 <u>下划线</u> & 符号，这是一段足够长的中文说明文字。",
+    )
     bot = FakeBot()
     publisher = build_publisher(db, settings, bot, tmp_path)
 
@@ -668,3 +701,110 @@ async def test_require_cover_false_keeps_the_text_only_card(
     assert report.published == 1
     assert report.deferred == 0
     assert len(bot.messages) == 1
+
+
+# -- 📝 only shows the official FC2 description -------------------------------
+
+
+async def seed_without_official_description(db: Database, tmp_path: Path) -> str:
+    """A content whose description only came from the Nyaa fallback."""
+
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_ja = "大家好，这里是【人渣崩坏】官方频道，请关注我们会不定期更新信息。"
+        result = await session.scalar(
+            select(ProviderResult).where(
+                ProviderResult.content_id == content_id, ProviderResult.provider == "Fc2"
+            )
+        )
+        assert result is not None
+        result.result_json = {"description_ja": None}
+    return content_id
+
+
+async def test_a_missing_official_description_omits_the_line(
+    db: Database, tmp_path: Path
+) -> None:
+    """The Nyaa post is a seller ad — never used as the plot."""
+
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    await seed_without_official_description(db, tmp_path)
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert "📝" not in caption
+    assert "人渣崩坏" not in caption
+
+
+async def test_a_url_only_description_is_omitted(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    await set_descriptions(
+        db,
+        content_id,
+        ja="https://imagetwist.com/367wmg0gouoq/grewag.png",
+        zh=None,
+    )
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert "📝" not in caption
+    assert "imagetwist" not in caption
+
+
+async def test_a_promotional_description_is_omitted(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    await set_descriptions(
+        db,
+        content_id,
+        ja="★ 特価★★ 3960pt→1980pt 期間限定キャンペーン実施中です。",
+        zh=None,
+    )
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert "📝" not in bot.messages[0][1]
+
+
+async def test_a_normal_official_description_is_shown(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    await set_descriptions(
+        db,
+        content_id,
+        ja="素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。",
+        zh=None,
+    )
+    bot = FakeBot()
+    publisher = build_publisher(db, settings, bot, tmp_path)
+
+    await publisher.publish_once()
+
+    assert "📝 素人初撮り。" in bot.messages[0][1]

@@ -164,7 +164,9 @@ async def test_translation_does_touch_updated_at(db: Database, tmp_path: Path) -
         translator=FakeTranslator(),
     )
 
-    translated = await service._translate(content_id, "説明文です。")
+    translated = await service._translate(
+        content_id, "素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。"
+    )
 
     assert translated == "中文译文"
     async with db.session() as session:

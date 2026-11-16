@@ -30,6 +30,7 @@ from app.network.image_fetcher import FetchedImage, ImageFetcher, ImageFetchErro
 from app.network.proxy import ProxyRouter
 from app.providers.coordinator import AggregatedMetadata, MetadataCoordinator, ProviderRun
 from app.schemas.metadata import ProviderContext
+from app.services.cards import usable_description
 from app.services.translate import (
     GOOGLE_FREE_ENDPOINT,
     FallbackTranslator,
@@ -106,6 +107,8 @@ def derive_image_allowlist(settings: Settings) -> list[str]:
 
 #: Provider id of the Nyaa page fallback (``app/providers/nyaa_fallback.py``).
 NYAA_FALLBACK_PROVIDER = "Nyaa"
+#: The only provider whose description is shown on a card / worth translating.
+OFFICIAL_DESCRIPTION_PROVIDER = "Fc2"
 
 
 class MetadataService:
@@ -147,7 +150,14 @@ class MetadataService:
         result.preview_asset_ids = preview_ids
         result.image_errors = errors
 
-        translated = await self._translate(content_id, aggregated.description_ja)
+        # Only the official FC2 description is worth translating: a Nyaa post is a
+        # seller ad or a pile of image links (deviation §58).
+        translate_source = (
+            aggregated.description_ja
+            if aggregated.sources.get("description_ja") == OFFICIAL_DESCRIPTION_PROVIDER
+            else None
+        )
+        translated = await self._translate(content_id, translate_source)
         result.description_zh = translated
         result.translated = bool(translated)
         return result
@@ -343,6 +353,11 @@ class MetadataService:
 
     async def _translate(self, content_id: str, description: str | None) -> str | None:
         if self.translator is None or not description or not description.strip():
+            return None
+        if usable_description(description) is None:
+            # A pile of image URLs or a seller's ad: translating it wastes a request
+            # and would only produce junk on the card (deviation §58).
+            _log.info("metadata.translate_skipped_junk", content_id=content_id)
             return None
         async with self.db.session() as session:
             content = await session.get(Content, content_id)

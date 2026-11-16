@@ -514,3 +514,14 @@
   📝 中文简介（无译文时用日文原文）
   <a href="…">nyaa</a>
   ```
+
+## 58. `📝` 只显示 FC2 官网描述，并过滤广告/纯链接
+
+- 问题：`4910695` 的 `📝` 是一串裸 URL（Nyaa 描述里只有图床链接，翻译又原样返回），`4910014`/`4907764` 是卖家广告（「官方频道」「特价 3960pt→1980pt」）。根因是**我们把 Nyaa 卖家文案当简介**。
+- 旧项目 `_official_description()` 只取 FC2 官网的 `og:description`，Nyaa 描述从不进卡片；官网抓不到时 `detail=""`，`📝` 整行省略。
+- 实现：
+  - `publisher._build_card` 通过 `_official_description()` 读 `provider_results` 里 **Fc2** 成功记录的 `description_ja`，其它来源一律不用；没有就整行省略（`description_zh` 也只在有官网描述时才显示）；
+  - `MetadataService.enrich` 只翻译 `aggregated.sources["description_ja"] == "Fc2"` 的文本；
+  - `cards.usable_description()` 兜底过滤（官网描述也过）：纯 URL / URL 字符占比 >30% / 去掉链接后不足 20 字 / 含 `请关注`、`官方频道`、`不定期更新`、`ランキング`、`高画質版`、`特価`、`pt→`、`ご登録`、`フォロー` 等推广词 → 整行省略；
+  - `_translate` 同样先过这个过滤，纯 URL/广告不发翻译请求（日志 `metadata.translate_skipped_junk`）。
+- 标题长度：`truncate` 只在超过 200 字时截断；46 字的标题说明库里 `title_ja` 本身就是那么长，不是我们截的（有测试守住：46 字原样保留）。
