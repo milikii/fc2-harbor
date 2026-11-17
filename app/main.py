@@ -32,6 +32,7 @@ from app.db.session import Database, migrate_async
 from app.downloaders.coordinator import DownloaderRegistry
 from app.logging import configure_logging, get_logger
 from app.network.clients import HttpClient
+from app.network.flaresolverr import FlareSolverrClient
 from app.network.image_fetcher import ImageFetcher
 from app.network.proxy import ProxyRouter
 from app.organizer.monitor import DownloadMonitor, reconcile_startup, run_monitor_loop
@@ -57,6 +58,16 @@ from app.services.telegram_assets import TelegramAssetUploader
 from app.sources.nyaa import NyaaSource
 
 _log = get_logger("main")
+
+
+def _build_flaresolverr(settings: Settings) -> FlareSolverrClient | None:
+    """The optional Byparr client. Empty URL means the path does not exist."""
+
+    url = settings.provider.flaresolverr_url
+    if not url:
+        return None
+    _log.info("byparr.configured", endpoint=url)
+    return FlareSolverrClient(url)
 
 
 async def run(settings: Settings) -> None:
@@ -85,6 +96,7 @@ async def run(settings: Settings) -> None:
     registry = DownloaderRegistry.from_settings(settings)
     nyaa_source: NyaaSource | None = None
     http_client: HttpClient | None = None
+    flaresolverr: FlareSolverrClient | None = None
     image_fetcher: ImageFetcher | None = None
     translator = None
     subscription_bot: Bot | None = None
@@ -136,7 +148,10 @@ async def run(settings: Settings) -> None:
             per_domain_concurrency=settings.nyaa.concurrency,
             max_retry_after_seconds=settings.nyaa.max_retry_after_seconds,
         )
-        providers, fallback = build_providers(settings, client=http_client, router=proxy_router)
+        flaresolverr = _build_flaresolverr(settings)
+        providers, fallback = build_providers(
+            settings, client=http_client, router=proxy_router, flaresolverr=flaresolverr
+        )
         coordinator = MetadataCoordinator(
             providers=providers, settings=settings, nyaa_fallback=fallback, metrics=metrics
         )
@@ -313,6 +328,9 @@ async def run(settings: Settings) -> None:
         if image_fetcher is not None:
             with contextlib.suppress(Exception):
                 await image_fetcher.aclose()
+        if flaresolverr is not None:
+            with contextlib.suppress(Exception):
+                await flaresolverr.aclose()
         if http_client is not None:
             with contextlib.suppress(Exception):
                 await http_client.aclose()

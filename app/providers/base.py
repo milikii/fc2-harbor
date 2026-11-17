@@ -28,7 +28,9 @@ from app.db.enums import Censorship
 from app.db.models import Content
 from app.logging import get_logger
 from app.network.browser_headers import provider_headers
+from app.network.challenge import classify_page, looks_like_login_wall
 from app.network.clients import HttpClient, HttpError
+from app.network.flaresolverr import FlareSolverrClient, FlareSolverrError
 from app.schemas.metadata import AssetCandidate, MetadataResult, ProviderContext
 
 _log = get_logger("provider")
@@ -357,6 +359,10 @@ class BaseProvider:
     proxy_key: str = ""
     #: Extra request headers, usually a referer for hotlink protection.
     referer: str | None = None
+    #: Elements the adapter cannot work without. A page missing all of them and
+    #: carrying only a few hundred characters is an empty shell (a challenge that
+    #: returned 200), not a valid "no results" page.
+    REQUIRED_SELECTORS: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -369,6 +375,7 @@ class BaseProvider:
         warmup_url: str | None = None,
         min_interval_seconds: float = 0.0,
         jitter_seconds: float = 0.0,
+        flaresolverr: FlareSolverrClient | None = None,
     ) -> None:
         self.client = client
         self.proxy_url = proxy_url
@@ -378,8 +385,28 @@ class BaseProvider:
         self.warmup_url = warmup_url
         self.min_interval_seconds = min_interval_seconds
         self.jitter_seconds = jitter_seconds
+        self.flaresolverr = flaresolverr
         self._warmed = False
         self._last_request = 0.0
+
+    @property
+    def fetch_timeout_seconds(self) -> float:
+        """Budget for one provider attempt, including the optional Byparr path.
+
+        The coordinator wraps ``fetch`` in ``asyncio.wait_for``. Without Byparr
+        this is exactly the configured source timeout; with it, the solver gets
+        its own budget on top instead of being cut off by the 15 s HTTP timeout.
+        """
+
+        if self.flaresolverr is None:
+            return self.timeout_seconds
+        return self.timeout_seconds + self.flaresolverr.budget_seconds
+
+    def _required_selectors(self) -> tuple[str, ...]:
+        if self.REQUIRED_SELECTORS:
+            return self.REQUIRED_SELECTORS
+        card = getattr(self, "CARD", None)
+        return (str(card),) if card else ()
 
     # -- URL construction (per provider) ------------------------------------
 
@@ -433,6 +460,14 @@ class BaseProvider:
 
     async def fetch(self, content: Content, ctx: ProviderContext) -> MetadataResult:
         url = self.build_url(content)
+        # A provider that may use Byparr must never be the one that goes direct:
+        # if the deployment enabled the solver but left this source on "direct",
+        # stop before the first request instead of silently bypassing the proxy.
+        if self.flaresolverr is not None and not self.proxy_url:
+            raise ProviderError(
+                "proxy_required",
+                f"{self.id}: Byparr is enabled but this source has no proxy profile",
+            )
         await self._throttle()
         referer = await self._warm_up() or self.referer
         headers = provider_headers(self.host, referer=referer, overrides=self.headers)
@@ -446,6 +481,10 @@ class BaseProvider:
                 proxy_region=self.proxy_region,
             )
         except HttpError as exc:
+            if self._byparr_eligible(exc.status):
+                return await self._fetch_via_byparr(
+                    url, content, ctx, started=started, http_status=exc.status
+                )
             # A 404 on a search-by-code page is a normal miss, not a broken site.
             code = "not_found" if exc.status == 404 else "http_error"
             _log.info(
@@ -457,24 +496,143 @@ class BaseProvider:
                 error_code=code,
             )
             raise ProviderError(code, f"{self.id}: {exc}", http_status=exc.status) from exc
+
+        verdict = classify_page(
+            status=response.status,
+            headers=response.headers,
+            html=response.text,
+            required_selectors=self._required_selectors(),
+        )
+        if verdict.kind == "login_wall":
+            # A login wall is not a challenge: Byparr cannot log in, and using an
+            # account is out of scope. The source is unavailable for this round.
+            raise ProviderError(
+                "login_wall",
+                f"{self.id}: login wall, Byparr not attempted",
+                http_status=response.status,
+            )
+        if verdict.is_challenge:
+            # A challenge can arrive with 200 as well as 403/503; the verdict is
+            # what matters here, not the status code.
+            if self.flaresolverr is not None and self.proxy_url:
+                return await self._fetch_via_byparr(
+                    url, content, ctx, started=started, http_status=response.status
+                )
+            raise ProviderError(
+                "challenge_unresolved",
+                f"{self.id}: challenge page ({verdict.reason or 'unknown'}), Byparr disabled",
+                http_status=response.status,
+            )
         if not 200 <= response.status < 300:
             raise ProviderError(
                 "http_error", f"{self.id}: status {response.status}", http_status=response.status
             )
-
-        page = ProviderPage(
-            url=url,
-            html=response.text,
-            status=response.status,
-            release_title=ctx.release_title,
-        )
-        extra = await self.fetch_extra(page, content, ctx)
-        if extra:
-            page = ProviderPage(
+        return await self._parse_page(
+            ProviderPage(
                 url=url,
                 html=response.text,
                 status=response.status,
                 release_title=ctx.release_title,
+            ),
+            content,
+            ctx,
+            started=started,
+            http_status=response.status,
+            via="http",
+        )
+
+    def _byparr_eligible(self, status: int | None) -> bool:
+        """Only a challenge or a transport failure is worth a browser attempt."""
+
+        if self.flaresolverr is None or not self.proxy_url:
+            return False
+        # 404/429 are answers, not bot walls: Byparr cannot improve them.
+        return status is None or status in {403, 503}
+
+    async def _fetch_via_byparr(
+        self,
+        url: str,
+        content: Content,
+        ctx: ProviderContext,
+        *,
+        started: float,
+        http_status: int | None,
+    ) -> MetadataResult:
+        assert self.flaresolverr is not None  # guarded by _byparr_eligible
+        try:
+            solved = await self.flaresolverr.request_get(
+                url,
+                proxy_url=self.proxy_url,
+                required_selectors=self._required_selectors(),
+            )
+        except FlareSolverrError as exc:
+            _log.info(
+                "provider.byparr_failed",
+                provider=self.id,
+                domain=self.host,
+                http_status=http_status,
+                latency_ms=int((time.monotonic() - started) * 1000),
+                error_code=exc.code,
+            )
+            raise ProviderError(exc.code, f"{self.id}: {exc}") from exc
+
+        if solved.status == 404:
+            raise ProviderError(
+                "not_found", f"{self.id}: no such page (404 via Byparr)", http_status=404
+            )
+        if looks_like_login_wall(solved.html):
+            raise ProviderError(
+                "login_wall", f"{self.id}: login wall after Byparr", http_status=solved.status
+            )
+        verdict = classify_page(
+            status=solved.status,
+            headers=None,
+            html=solved.html,
+            required_selectors=self._required_selectors(),
+        )
+        if verdict.is_challenge:
+            raise ProviderError(
+                "challenge_unresolved",
+                f"{self.id}: still a challenge after Byparr ({verdict.reason or 'unknown'})",
+                http_status=solved.status,
+            )
+        if solved.status >= 400:
+            raise ProviderError(
+                "http_error",
+                f"{self.id}: status {solved.status} via Byparr",
+                http_status=solved.status,
+            )
+        return await self._parse_page(
+            ProviderPage(
+                url=solved.url,
+                html=solved.html,
+                status=solved.status,
+                release_title=ctx.release_title,
+            ),
+            content,
+            ctx,
+            started=started,
+            http_status=solved.status,
+            via="byparr",
+        )
+
+    async def _parse_page(
+        self,
+        page: ProviderPage,
+        content: Content,
+        ctx: ProviderContext,
+        *,
+        started: float,
+        http_status: int,
+        via: str,
+    ) -> MetadataResult:
+        extra = await self.fetch_extra(page, content, ctx)
+        if extra:
+            page = ProviderPage(
+                url=page.url,
+                html=page.html,
+                status=page.status,
+                release_title=page.release_title,
                 extra=extra,
             )
         result = self.parse(page, content)
@@ -483,13 +641,16 @@ class BaseProvider:
             "provider.fetch",
             provider=self.id,
             domain=self.host,
-            status=response.status,
+            status=http_status,
             latency_ms=latency_ms,
             found=result is not None,
+            via=via,
             asset_count=(len(result.previews) + (1 if result.cover else 0)) if result else 0,
         )
         if result is None:
-            raise ProviderError("not_found", f"{self.id}: no matching entry", http_status=200)
+            raise ProviderError(
+                "not_found", f"{self.id}: no matching entry", http_status=http_status
+            )
         return result
 
     async def fetch_extra(

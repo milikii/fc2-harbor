@@ -30,6 +30,7 @@ class MissAvProvider(BaseProvider):
     proxy_key = "miss_av"
     referer = "https://missav123.com/"
     CARD = ".thumbnail, .grid .item, .item"
+    REQUIRED_SELECTORS = (CARD,)
 
     def build_url(self, content: Content) -> str:
         return f"https://{self.host}/search/{quote(content_code(content))}"

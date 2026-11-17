@@ -70,6 +70,11 @@ provider:
   # per card; measurement found no free source with a full FC2 description, so
   # this stays off. The merge rule (full beats summary) always applies.
   seek_full_description: false
+  # Optional FlareSolverr-protocol endpoint (Byparr). Leave the environment
+  # variable empty to disable it: HTTP behaviour is then unchanged. When set,
+  # only the P0 pilot sources (miss_av, fc2_hub) use it, and only after a
+  # Cloudflare challenge. A source without a proxy is refused, never sent direct.
+  flaresolverr_url: "${FLARESOLVERR_URL}"
   # Fixed order, never reordered by hit rate (spec 7.1). Validated at startup.
   priorities:
     jav_fc2: [Fc2, fc2_hub, Javdb, Mmtv, freejavbt, miss_av, Javlibrary, avsox, Madou]

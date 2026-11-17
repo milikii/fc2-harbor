@@ -31,6 +31,7 @@ from app.db.enums import Censorship, ContentType
 from app.db.models import Content
 from app.logging import error_detail, get_logger
 from app.network.clients import HttpClient
+from app.network.flaresolverr import FlareSolverrClient
 from app.network.proxy import ProxyRouter
 from app.providers.avsox import AvsoxProvider
 from app.providers.base import (
@@ -66,6 +67,10 @@ PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
 }
 
 HEALTH_WARNING_THRESHOLD = 3
+
+#: P0 pilot: only these sources may use Byparr. The list is deliberately small
+#: so the change stays reviewable; P1 expands it after the pilot is accepted.
+FLARESOLVERR_PILOT_PROVIDERS: frozenset[str] = frozenset({"miss_av", "fc2_hub"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,7 +308,7 @@ class MetadataCoordinator:
         started = time.monotonic()
         try:
             result = await asyncio.wait_for(
-                provider.fetch(content, ctx), timeout=provider.timeout_seconds
+                provider.fetch(content, ctx), timeout=provider.fetch_timeout_seconds
             )
         except ProviderError as exc:
             latency = int((time.monotonic() - started) * 1000)
@@ -541,7 +546,11 @@ def _result_json(result: MetadataResult) -> dict[str, object]:
 
 
 def build_providers(
-    settings: Settings, *, client: HttpClient, router: ProxyRouter
+    settings: Settings,
+    *,
+    client: HttpClient,
+    router: ProxyRouter,
+    flaresolverr: FlareSolverrClient | None = None,
 ) -> tuple[list[BaseProvider], NyaaFallbackProvider]:
     """Instantiate the nine adapters in the configured (fixed) order."""
 
@@ -553,6 +562,9 @@ def build_providers(
             continue
         provider_class = PROVIDER_CLASSES[name]
         target = router.for_provider(source.proxy)
+        solver = flaresolverr if name in FLARESOLVERR_PILOT_PROVIDERS else None
+        if solver is not None:
+            _log.info("metadata.byparr_enabled", provider=name, domain=source.host)
         providers.append(
             provider_class(
                 client=client,
@@ -563,6 +575,7 @@ def build_providers(
                 warmup_url=source.warmup_url,
                 min_interval_seconds=source.min_interval_seconds,
                 jitter_seconds=source.jitter_seconds,
+                flaresolverr=solver,
             )
         )
 

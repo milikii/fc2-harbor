@@ -30,6 +30,7 @@ class Fc2HubProvider(BaseProvider):
     proxy_key = "fc2_hub"
     referer = "https://javten.com/"
     CARD = ".card, .video-card, article"
+    REQUIRED_SELECTORS = (CARD,)
 
     def build_url(self, content: Content) -> str:
         return f"https://{self.host}/search?q={quote(content_code(content))}"

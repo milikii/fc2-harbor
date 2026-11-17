@@ -226,3 +226,26 @@ def test_redact_url_credentials() -> None:
         redact_url_credentials("http://token@proxy.example:8080") == "http://***@proxy.example:8080"
     )
     assert redact_url_credentials("http://proxy.example:8080") == "http://proxy.example:8080"
+
+
+def test_flaresolverr_url_is_optional(tmp_path: Path) -> None:
+    settings = Settings.from_mapping(make_config(tmp_path), env={})
+    assert settings.provider.flaresolverr_url is None
+
+
+def test_flaresolverr_url_is_expanded_from_the_environment(tmp_path: Path) -> None:
+    config = deep_update(
+        make_config(tmp_path), {"provider": {"flaresolverr_url": "${FLARESOLVERR_URL}"}}
+    )
+    settings = Settings.from_mapping(
+        config, env={"FLARESOLVERR_URL": "http://192.168.1.220:8191"}
+    )
+    assert settings.provider.flaresolverr_url == "http://192.168.1.220:8191"
+
+
+def test_flaresolverr_url_must_be_http(tmp_path: Path) -> None:
+    config = deep_update(
+        make_config(tmp_path), {"provider": {"flaresolverr_url": "ftp://byparr:8191"}}
+    )
+    with pytest.raises(ConfigError):
+        Settings.from_mapping(config, env={})
