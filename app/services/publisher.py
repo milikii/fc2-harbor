@@ -123,6 +123,9 @@ class Publisher:
             return "skipped"
 
         await self._ensure_metadata(content, need_cover=self.require_cover)
+        content, release = await self._load(candidate.content_id)
+        if content is None:
+            return "skipped"
         card = await self._build_card(content, release, candidate)
         cover = await self._cover_asset(content.id)
         if cover is None and self.require_cover:
