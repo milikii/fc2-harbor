@@ -18,8 +18,10 @@ Rules encoded here:
   before asking Byparr and never falls back to a direct connection. Byparr's own
   outbound traffic is configured separately (``PROXY_SERVER`` in compose).
 
-Cookie values are never logged and never returned; only their names and whether
-``cf_clearance`` is present, which is enough to diagnose the handshake.
+Cookie values are never logged. They are returned **in memory** together with the
+browser's user agent, because a follow-up request may need the cookies solved by
+Byparr replayed by :class:`HttpClient`. Only cookie names and whether
+``cf_clearance`` is present are ever logged.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import contextlib
 import random
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -75,15 +77,23 @@ class FlareSolverrResult:
     url: str
     status: int
     html: str
-    #: Cookie **names** only. Values are credentials and never leave the client.
+    #: Cookie **names** only; safe to log and to put in diagnostics.
     cookie_names: tuple[str, ...]
     user_agent: str | None
     latency_ms: int
     attempts: int
+    #: Cookie (name, value) pairs for the follow-up request. Credentials: kept
+    #: in memory only, excluded from ``repr`` and never written to a log or ``raw``.
+    cookies: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
     def has_cf_clearance(self) -> bool:
         return "cf_clearance" in self.cookie_names
+
+    def cookie_map(self) -> dict[str, str]:
+        """Cookie header values for one follow-up request. Never log the result."""
+
+        return dict(self.cookies)
 
 
 class DomainCircuitBreaker:
@@ -366,12 +376,18 @@ class FlareSolverrClient:
                         f"{domain}: still a challenge ({verdict.reason or 'unknown'})",
                     )
 
-                cookies = solution.get("cookies")
+                cookies_raw = solution.get("cookies")
                 names: list[str] = []
-                if isinstance(cookies, list):
-                    for item in cookies:
-                        if isinstance(item, dict) and item.get("name"):
-                            names.append(str(item["name"]))
+                cookies: list[tuple[str, str]] = []
+                if isinstance(cookies_raw, list):
+                    for item in cookies_raw:
+                        if not isinstance(item, dict) or not item.get("name"):
+                            continue
+                        name = str(item["name"])
+                        names.append(name)
+                        value = item.get("value")
+                        if value is not None:
+                            cookies.append((name, str(value)))
                 user_agent = solution.get("userAgent")
                 result = FlareSolverrResult(
                     url=str(solution.get("url") or url),
@@ -381,6 +397,7 @@ class FlareSolverrClient:
                     user_agent=str(user_agent) if user_agent else None,
                     latency_ms=latency_ms,
                     attempts=attempt,
+                    cookies=tuple(cookies),
                 )
                 _log.info(
                     "byparr.request",
@@ -397,19 +414,13 @@ class FlareSolverrClient:
     @staticmethod
     def _decode(response: httpx.Response) -> dict[str, Any]:
         if response.status_code >= 500:
-            raise FlareSolverrError(
-                "byparr_http_error", f"Byparr answered {response.status_code}"
-            )
+            raise FlareSolverrError("byparr_http_error", f"Byparr answered {response.status_code}")
         if response.status_code >= 400:
-            raise FlareSolverrError(
-                "byparr_http_error", f"Byparr answered {response.status_code}"
-            )
+            raise FlareSolverrError("byparr_http_error", f"Byparr answered {response.status_code}")
         try:
             payload = response.json()
         except ValueError as exc:
-            raise FlareSolverrError(
-                "byparr_invalid_response", "Byparr answer is not JSON"
-            ) from exc
+            raise FlareSolverrError("byparr_invalid_response", "Byparr answer is not JSON") from exc
         if not isinstance(payload, dict):
             raise FlareSolverrError("byparr_invalid_response", "Byparr answer is not an object")
         if payload.get("status") != "ok":

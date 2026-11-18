@@ -76,9 +76,7 @@ async def test_posts_flaresolverr_payload_and_returns_page(respx_mock: respx.Moc
     route = respx_mock.post(f"{BASE}/v1").respond(200, json=answer())
     client, _ = make_client()
     try:
-        result = await client.request_get(
-            URL, proxy_url=PROXY, required_selectors=(".thumbnail",)
-        )
+        result = await client.request_get(URL, proxy_url=PROXY, required_selectors=(".thumbnail",))
     finally:
         await client.aclose()
 
@@ -92,7 +90,12 @@ async def test_posts_flaresolverr_payload_and_returns_page(respx_mock: respx.Moc
     assert "FC2-PPV-4559944" in result.html
     assert result.cookie_names == ("cf_clearance", "user_uuid")
     assert result.has_cf_clearance is True
-    # Cookie values are credentials: they must not be part of the result object.
+    # Cookie values are credentials: kept in memory for the follow-up request,
+    # excluded from repr and never logged.
+    assert result.cookie_map() == {
+        "cf_clearance": "TOP-SECRET-COOKIE",
+        "user_uuid": "also-secret",
+    }
     assert "TOP-SECRET-COOKIE" not in repr(result)
 
 
@@ -265,8 +268,7 @@ async def test_unresolved_challenge_is_a_failure_not_a_result(
     respx_mock: respx.MockRouter,
 ) -> None:
     challenge = (
-        "<html><head><title>Just a moment...</title></head>"
-        "<body>Just a moment...</body></html>"
+        "<html><head><title>Just a moment...</title></head><body>Just a moment...</body></html>"
     )
     route = respx_mock.post(f"{BASE}/v1").respond(200, json=answer(status=403, html=challenge))
     client, delays = make_client()

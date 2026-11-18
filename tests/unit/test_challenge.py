@@ -15,11 +15,13 @@ missav123.com</h1><p>Enable JavaScript and cookies to continue</p>
 <script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>
 </div></body></html>"""
 
-SOLVED_HTML = """<!DOCTYPE html><html><head><title>FC2-PPV-4559944 結果</title></head>
+SOLVED_HTML = (
+    """<!DOCTYPE html><html><head><title>FC2-PPV-4559944 結果</title></head>
 <body><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>
-<div class="grid">""" + "".join(
-    f'<div class="thumbnail"><a href="/en/{i}">FC2-PPV-{i}</a></div>' for i in range(5)
-) + "</div></body></html>"
+<div class="grid">"""
+    + "".join(f'<div class="thumbnail"><a href="/en/{i}">FC2-PPV-{i}</a></div>' for i in range(5))
+    + "</div></body></html>"
+)
 
 EMPTY_SHELL = "<html><head></head><body><div id=app></div></body></html>"
 
@@ -47,12 +49,12 @@ def test_cloudflare_403_is_a_challenge() -> None:
     assert verdict.reason == "cf-mitigated"
 
 
-def test_solved_page_with_challenge_script_is_not_a_challenge() -> None:
-    """Cloudflare leaves its script tag on the solved page; content decides."""
+def test_solved_page_with_cf_mitigated_header_is_not_a_challenge() -> None:
+    """Byparr's solved page keeps both the header and the script; content decides."""
 
     verdict = classify_page(
         status=200,
-        headers={"server": "cloudflare"},
+        headers={"server": "cloudflare", "cf-mitigated": "challenge"},
         html=SOLVED_HTML,
         required_selectors=(".thumbnail",),
     )
@@ -93,6 +95,44 @@ def test_login_form_is_a_login_wall() -> None:
 
 def test_navigation_login_link_alone_is_not_a_wall() -> None:
     assert looks_like_login_wall(NO_RESULTS) is False
+
+
+def test_hidden_login_modal_is_not_a_wall() -> None:
+    """missav ships its login/register modal in every page, hidden by markup.
+
+    The static HTML still carries the password inputs; only a visible form counts.
+    """
+
+    html = """<html><head><title>検索結果 - サイト</title></head><body>
+<div x-show="showModal.login" style="display: none;">
+<form @submit.prevent="login"><input type="password" name="password"></form>
+</div>
+<div class="thumbnail"><a href="/en/1">FC2-PPV-1234567 タイトル</a></div>
+</body></html>"""
+
+    assert looks_like_login_wall(html) is False
+    verdict = classify_page(
+        status=200,
+        headers={"cf-mitigated": "challenge"},
+        html=html,
+        required_selectors=(".thumbnail",),
+    )
+    assert verdict.kind == "ok"
+
+
+def test_required_content_wins_over_a_visible_login_form() -> None:
+    """A provider that can still parse its cards must not be called unavailable."""
+
+    html = """<html><body><form action="/login"><input type="password"></form>
+<div class="thumbnail">FC2-PPV-1234567 タイトル</div></body></html>"""
+
+    verdict = classify_page(
+        status=200,
+        headers=None,
+        html=html,
+        required_selectors=(".thumbnail",),
+    )
+    assert verdict.kind == "ok"
 
 
 def test_404_page_is_not_a_challenge() -> None:

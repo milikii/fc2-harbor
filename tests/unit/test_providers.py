@@ -9,12 +9,14 @@ not that a live site still looks like this.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from app.db.enums import Censorship, ContentType
 from app.db.models import Content
-from app.network.clients import HttpClient
+from app.network.clients import HttpClient, HttpError
+from app.network.flaresolverr import FlareSolverrResult
 from app.providers.avsox import AvsoxProvider
 from app.providers.base import (
     BaseProvider,
@@ -54,7 +56,7 @@ def page(name: str, url: str) -> ProviderPage:
 
 CASES = [
     (Fc2Provider, "fc2.html", "https://adult.contents.fc2.com/article/1234567/", True, 2),
-    (Fc2HubProvider, "fc2_hub.html", "https://javten.com/search?q=FC2-PPV-1234567", True, 0),
+    (Fc2HubProvider, "fc2_hub.html", "https://javten.com/v/9001", True, 0),
     (JavdbProvider, "javdb.html", "https://javdb.com/search?q=FC2-PPV-1234567&f=all", True, 0),
     (MmtvProvider, "mmtv.html", "https://7mmtv.sx/search/?q=FC2-PPV-1234567", True, 0),
     (FreejavbtProvider, "freejavbt.html", "https://freejavbt.com/?s=FC2-PPV-1234567", True, 0),
@@ -199,7 +201,7 @@ def test_missing_anchors_raise_structure_changed(
 @pytest.mark.parametrize(
     ("cls", "fixture", "url"),
     [
-        (Fc2HubProvider, "fc2_hub.html", "https://javten.com/search?q=FC2-PPV-7654321"),
+        (Fc2HubProvider, "fc2_hub.html", "https://javten.com/v/9001"),
         (JavdbProvider, "javdb.html", "https://javdb.com/search?q=FC2-PPV-7654321&f=all"),
         (MmtvProvider, "mmtv.html", "https://7mmtv.sx/search/?q=FC2-PPV-7654321"),
         (FreejavbtProvider, "freejavbt.html", "https://freejavbt.com/?s=FC2-PPV-7654321"),
@@ -212,6 +214,29 @@ def test_no_matching_entry_returns_none(cls: type[BaseProvider], fixture: str, u
     """A fetched page without our number is a miss, not a failure."""
 
     assert provider(cls).parse(page(fixture, url), make_content("7654321")) is None
+
+
+def test_miss_av_live_card_uses_the_separate_title_anchor() -> None:
+    """The live search card's cover anchor comes first and has no text.
+
+    The title sits in its own ``.text-secondary`` anchor below it; matching the
+    first ``a`` would read an empty string and drop a valid card.
+    """
+
+    html = """<html><body><div class="thumbnail group">
+<div class="relative"><a href="https://missav123.com/dm14/fc2-ppv-1234567" alt="fc2-ppv-1234567">
+<img src="https://fourhoi.com/fc2-ppv-1234567/cover-t.jpg" alt="タイトル"></a></div>
+<div class="my-2 text-sm truncate"><a class="text-secondary"
+ href="https://missav123.com/dm14/fc2-ppv-1234567" alt="fc2-ppv-1234567">FC2-PPV-1234567
+ タイトル</a></div>
+</div></body></html>"""
+    result = provider(MissAvProvider).parse(
+        ProviderPage(url="https://missav123.com/search/FC2-PPV-1234567", html=html, status=200),
+        make_content(),
+    )
+    assert result is not None
+    assert result.title_ja == "FC2-PPV-1234567 タイトル"
+    assert result.cover is not None
 
 
 def test_nyaa_fallback_parses_view_page() -> None:
@@ -245,7 +270,7 @@ def _retitle(html: str, code: str) -> str:
 
 
 CODE_MATCHING_CASES = [
-    (Fc2HubProvider, "fc2_hub.html", "https://javten.com/search?q=FC2-PPV-1234567"),
+    (Fc2HubProvider, "fc2_hub.html", "https://javten.com/v/9001"),
     (JavdbProvider, "javdb.html", "https://javdb.com/search?q=FC2-PPV-1234567&f=all"),
     (MmtvProvider, "mmtv.html", "https://7mmtv.sx/search/?q=FC2-PPV-1234567"),
     (FreejavbtProvider, "freejavbt.html", "https://freejavbt.com/?s=FC2-PPV-1234567"),
@@ -365,8 +390,9 @@ def test_fc2_falls_back_to_the_meta_description() -> None:
     """No widget → meta[name=description], which is longer than og:description."""
 
     result = provider(Fc2Provider).parse(
-        page("fc2_article_with_description.html",
-             "https://adult.contents.fc2.com/article/1234567/"),
+        page(
+            "fc2_article_with_description.html", "https://adult.contents.fc2.com/article/1234567/"
+        ),
         make_content(),
     )
 
@@ -637,9 +663,7 @@ def test_nyaa_fallback_rewrites_a_torrent_download_url() -> None:
     """RSS links are ``/download/<id>.torrent``; fetching that returns bencode."""
 
     fallback = provider(NyaaFallbackProvider)
-    url = fallback.url_for_release(
-        "https://sukebei.nyaa.si/download/4761220.torrent", "4761220"
-    )
+    url = fallback.url_for_release("https://sukebei.nyaa.si/download/4761220.torrent", "4761220")
     assert url == "https://sukebei.nyaa.si/view/4761220"
 
 
@@ -831,7 +855,7 @@ def javdb_card(number: str, *, title_suffix: str = "作品", cover: str = "/cove
         f'<a class="box" href="/v/abc123">'
         f'<div class="cover"><img src="{cover}"></div>'
         f'<div class="video-title"><strong>FC2-{number}</strong>{title_suffix}</div>'
-        "</a><div class=\"meta\">2020-11-14</div></div></div>"
+        '</a><div class="meta">2020-11-14</div></div></div>'
     )
 
 
@@ -860,9 +884,7 @@ def test_javdb_rejects_a_near_number() -> None:
 
 def test_javdb_403_is_rate_limited_not_structure_changed() -> None:
     with pytest.raises(ProviderError) as excinfo:
-        provider(JavdbProvider).parse(
-            javdb_page("", status=403), make_content("4906073")
-        )
+        provider(JavdbProvider).parse(javdb_page("", status=403), make_content("4906073"))
     assert excinfo.value.code == "rate_limited"
 
 
@@ -935,3 +957,141 @@ def test_javdb_login_wall_is_reported_as_such() -> None:
     with pytest.raises(ProviderError) as excinfo:
         provider(JavdbProvider).parse(javdb_page(html), make_content("4906073"))
     assert excinfo.value.code == "login_required"
+
+
+# -- fc2_hub: a single search GET redirects to the detail page ---------------
+
+
+def detail_page() -> str:
+    return (FIXTURES / "fc2_hub.html").read_text(encoding="utf-8")
+
+
+async def test_fc2_hub_follows_the_search_redirect_to_the_detail_page() -> None:
+    """``/search?kw=`` answers 302; the detail page is what we parse."""
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if request.url.path == "/search":
+            return httpx.Response(302, headers={"location": "https://javten.com/v/9001"})
+        return httpx.Response(
+            200, content=detail_page().encode(), headers={"content-type": "text/html"}
+        )
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = Fc2HubProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert seen == [
+        "https://javten.com/search?kw=FC2-PPV-1234567",
+        "https://javten.com/v/9001",
+    ]
+    assert result.title_ja == "FC2-PPV-1234567 サンプル作品"
+    assert result.official_url == "https://javten.com/v/fc2-ppv-1234567"
+    assert result.raw["provider_url"] == "https://javten.com/v/9001"
+    assert result.cover is not None
+    assert result.cover.url == "https://javten.com/img/1234567.jpg"
+    assert result.description_ja == "作品の説明。"
+
+
+class _FakeSolver:
+    budget_seconds = 100.0
+
+    def __init__(self, result: FlareSolverrResult) -> None:
+        self.result = result
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    async def request_get(
+        self,
+        url: str,
+        *,
+        proxy_url: str | None,
+        required_selectors: tuple[str, ...] = (),
+    ) -> FlareSolverrResult:
+        self.calls.append((url, required_selectors))
+        return self.result
+
+
+class _ForbiddenHttp:
+    """Stands in for HttpClient: the search GET 403s before Byparr takes over."""
+
+    def __init__(self) -> None:
+        self.gets: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> None:
+        self.gets.append(url)
+        raise HttpError("javten.com answered 403", status=403, url=url)
+
+
+async def test_fc2_hub_asks_byparr_for_the_search_get() -> None:
+    """A 403 on the search GET is solved by Byparr, not replayed as a POST."""
+
+    http = _ForbiddenHttp()
+    solver = _FakeSolver(
+        FlareSolverrResult(
+            url="https://javten.com/v/9001",
+            status=200,
+            html=detail_page(),
+            cookie_names=("cf_clearance",),
+            user_agent="Mozilla/5.0 (Solved)",
+            latency_ms=10,
+            attempts=1,
+            cookies=(("cf_clearance", "secret"),),
+        )
+    )
+    instance = Fc2HubProvider(
+        client=http,  # type: ignore[arg-type]
+        proxy_url="http://127.0.0.1:7890",
+        timeout_seconds=5,
+        flaresolverr=solver,  # type: ignore[arg-type]
+    )
+
+    result = await instance.fetch(make_content(), ProviderContext(canonical_key="fc2_ppv:1234567"))
+
+    assert http.gets == ["https://javten.com/search?kw=FC2-PPV-1234567"]
+    assert solver.calls == [
+        (
+            "https://javten.com/search?kw=FC2-PPV-1234567",
+            ('link[rel="canonical"]', 'meta[property="og:title"]'),
+        )
+    ]
+    assert result.title_ja == "FC2-PPV-1234567 サンプル作品"
+    assert result.raw["provider_url"] == "https://javten.com/v/9001"
+
+
+def test_fc2_hub_accepts_a_number_in_the_canonical_url() -> None:
+    """h1 and og:title may omit the code; canonical can still carry it."""
+
+    html = (
+        '<html><head><link rel="canonical" href="https://javten.com/v/1234567">'
+        '<meta property="og:title" content="サンプル作品"></head>'
+        "<body><h1>サンプル作品</h1></body></html>"
+    )
+    result = provider(Fc2HubProvider).parse(
+        ProviderPage(url="https://javten.com/v/9001", html=html, status=200),
+        make_content(),
+    )
+
+    assert result is not None
+    assert result.title_ja == "サンプル作品"
+
+
+def test_fc2_hub_rejects_a_detail_page_without_the_number() -> None:
+    html = (
+        '<html><head><link rel="canonical" href="https://javten.com/v/9999">'
+        '<meta property="og:title" content="別作品"></head>'
+        "<body><h1>別作品</h1></body></html>"
+    )
+    assert (
+        provider(Fc2HubProvider).parse(
+            ProviderPage(url="https://javten.com/v/9001", html=html, status=200),
+            make_content(),
+        )
+        is None
+    )

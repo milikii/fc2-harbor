@@ -28,7 +28,7 @@ from app.db.enums import Censorship
 from app.db.models import Content
 from app.logging import get_logger
 from app.network.browser_headers import provider_headers
-from app.network.challenge import classify_page, looks_like_login_wall
+from app.network.challenge import classify_page
 from app.network.clients import HttpClient, HttpError
 from app.network.flaresolverr import FlareSolverrClient, FlareSolverrError
 from app.schemas.metadata import AssetCandidate, MetadataResult, ProviderContext
@@ -64,6 +64,34 @@ class ProviderPage:
     @property
     def tree(self) -> LexborHTMLParser:
         return LexborHTMLParser(self.html)
+
+
+@dataclass(frozen=True, slots=True)
+class RequestSpec:
+    """One provider request, built once and reused by every code path.
+
+    The direct request, the Byparr request and the challenge verdict all read this
+    spec, so they cannot drift to different URLs, methods or selectors. ``form`` and
+    ``cookies`` are credentials-adjacent: never log them and never copy them into
+    ``MetadataResult.raw``.
+    """
+
+    url: str
+    method: str = "GET"
+    form: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
+    cookies: Mapping[str, str] = field(default_factory=dict)
+    required_selectors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedPage:
+    """A fetched page plus what a follow-up request needs (Byparr cookies, UA)."""
+
+    page: ProviderPage
+    via: str = "http"
+    cookies: tuple[tuple[str, str], ...] = ()
+    user_agent: str | None = None
 
 
 def content_number(content: Content) -> str:
@@ -413,6 +441,19 @@ class BaseProvider:
     def build_url(self, content: Content) -> str:
         raise NotImplementedError
 
+    async def build_request(self, content: Content) -> RequestSpec:
+        """The one request this provider makes for ``content``.
+
+        Most sites answer a GET. A site whose search form is a POST overrides this
+        and may first load the form page through the same direct/Byparr path, to
+        pick up the hidden token and the solved cookies.
+        """
+
+        return RequestSpec(
+            url=self.build_url(content),
+            required_selectors=self._required_selectors(),
+        )
+
     # -- fetch --------------------------------------------------------------
 
     async def _throttle(self) -> None:
@@ -459,7 +500,6 @@ class BaseProvider:
         return self.warmup_url
 
     async def fetch(self, content: Content, ctx: ProviderContext) -> MetadataResult:
-        url = self.build_url(content)
         # A provider that may use Byparr must never be the one that goes direct:
         # if the deployment enabled the solver but left this source on "direct",
         # stop before the first request instead of silently bypassing the proxy.
@@ -470,20 +510,67 @@ class BaseProvider:
             )
         await self._throttle()
         referer = await self._warm_up() or self.referer
-        headers = provider_headers(self.host, referer=referer, overrides=self.headers)
+        started = time.monotonic()
+        spec = await self.build_request(content)
+        loaded = await self._load_page(spec, referer=referer, release_title=ctx.release_title)
+        return await self._parse_page(
+            loaded.page,
+            content,
+            ctx,
+            started=started,
+            http_status=loaded.page.status,
+            via=loaded.via,
+        )
+
+    def _byparr_eligible(self, status: int | None) -> bool:
+        """Only a challenge or a transport failure is worth a browser attempt."""
+
+        if self.flaresolverr is None or not self.proxy_url:
+            return False
+        # 404/429 are answers, not bot walls: Byparr cannot improve them.
+        return status is None or status in {403, 503}
+
+    async def _load_page(
+        self,
+        spec: RequestSpec,
+        *,
+        referer: str | None,
+        release_title: str | None = None,
+    ) -> LoadedPage:
+        """Run ``spec`` direct, fall back to Byparr, and judge the answer.
+
+        The spec is the only place the method, URL, form body, extra headers and
+        required selectors live, so the direct request, the Byparr request and the
+        challenge verdict cannot drift apart.
+        """
+
+        headers = provider_headers(
+            self.host, referer=referer, overrides={**self.headers, **dict(spec.headers)}
+        )
         started = time.monotonic()
         try:
-            response = await self.client.get(
-                url,
-                headers=headers,
-                proxy_url=self.proxy_url,
-                proxy_label=self.proxy_key or self.id,
-                proxy_region=self.proxy_region,
-            )
+            if spec.method == "POST":
+                response = await self.client.post(
+                    spec.url,
+                    data=dict(spec.form),
+                    headers=headers,
+                    cookies=dict(spec.cookies),
+                    proxy_url=self.proxy_url,
+                    proxy_label=self.proxy_key or self.id,
+                    proxy_region=self.proxy_region,
+                )
+            else:
+                response = await self.client.get(
+                    spec.url,
+                    headers=headers,
+                    proxy_url=self.proxy_url,
+                    proxy_label=self.proxy_key or self.id,
+                    proxy_region=self.proxy_region,
+                )
         except HttpError as exc:
-            if self._byparr_eligible(exc.status):
-                return await self._fetch_via_byparr(
-                    url, content, ctx, started=started, http_status=exc.status
+            if spec.method == "GET" and self._byparr_eligible(exc.status):
+                return await self._load_via_byparr(
+                    spec, started=started, http_status=exc.status, release_title=release_title
                 )
             # A 404 on a search-by-code page is a normal miss, not a broken site.
             code = "not_found" if exc.status == 404 else "http_error"
@@ -491,6 +578,7 @@ class BaseProvider:
                 "provider.fetch_failed",
                 provider=self.id,
                 domain=self.host,
+                method=spec.method,
                 status=exc.status,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 error_code=code,
@@ -501,7 +589,7 @@ class BaseProvider:
             status=response.status,
             headers=response.headers,
             html=response.text,
-            required_selectors=self._required_selectors(),
+            required_selectors=spec.required_selectors,
         )
         if verdict.kind == "login_wall":
             # A login wall is not a challenge: Byparr cannot log in, and using an
@@ -513,57 +601,48 @@ class BaseProvider:
             )
         if verdict.is_challenge:
             # A challenge can arrive with 200 as well as 403/503; the verdict is
-            # what matters here, not the status code.
-            if self.flaresolverr is not None and self.proxy_url:
-                return await self._fetch_via_byparr(
-                    url, content, ctx, started=started, http_status=response.status
+            # what matters here, not the status code. Byparr only speaks GET, so a
+            # POST cannot be replayed there.
+            if spec.method == "GET" and self.flaresolverr is not None and self.proxy_url:
+                return await self._load_via_byparr(
+                    spec,
+                    started=started,
+                    http_status=response.status,
+                    release_title=release_title,
                 )
             raise ProviderError(
                 "challenge_unresolved",
-                f"{self.id}: challenge page ({verdict.reason or 'unknown'}), Byparr disabled",
+                f"{self.id}: challenge page ({verdict.reason or 'unknown'})",
                 http_status=response.status,
             )
         if not 200 <= response.status < 300:
             raise ProviderError(
                 "http_error", f"{self.id}: status {response.status}", http_status=response.status
             )
-        return await self._parse_page(
-            ProviderPage(
-                url=url,
+        return LoadedPage(
+            page=ProviderPage(
+                url=response.url,
                 html=response.text,
                 status=response.status,
-                release_title=ctx.release_title,
+                release_title=release_title,
             ),
-            content,
-            ctx,
-            started=started,
-            http_status=response.status,
             via="http",
         )
 
-    def _byparr_eligible(self, status: int | None) -> bool:
-        """Only a challenge or a transport failure is worth a browser attempt."""
-
-        if self.flaresolverr is None or not self.proxy_url:
-            return False
-        # 404/429 are answers, not bot walls: Byparr cannot improve them.
-        return status is None or status in {403, 503}
-
-    async def _fetch_via_byparr(
+    async def _load_via_byparr(
         self,
-        url: str,
-        content: Content,
-        ctx: ProviderContext,
+        spec: RequestSpec,
         *,
         started: float,
         http_status: int | None,
-    ) -> MetadataResult:
-        assert self.flaresolverr is not None  # guarded by _byparr_eligible
+        release_title: str | None = None,
+    ) -> LoadedPage:
+        assert self.flaresolverr is not None  # guarded by the callers
         try:
             solved = await self.flaresolverr.request_get(
-                url,
+                spec.url,
                 proxy_url=self.proxy_url,
-                required_selectors=self._required_selectors(),
+                required_selectors=spec.required_selectors,
             )
         except FlareSolverrError as exc:
             _log.info(
@@ -580,16 +659,16 @@ class BaseProvider:
             raise ProviderError(
                 "not_found", f"{self.id}: no such page (404 via Byparr)", http_status=404
             )
-        if looks_like_login_wall(solved.html):
-            raise ProviderError(
-                "login_wall", f"{self.id}: login wall after Byparr", http_status=solved.status
-            )
         verdict = classify_page(
             status=solved.status,
             headers=None,
             html=solved.html,
-            required_selectors=self._required_selectors(),
+            required_selectors=spec.required_selectors,
         )
+        if verdict.kind == "login_wall":
+            raise ProviderError(
+                "login_wall", f"{self.id}: login wall after Byparr", http_status=solved.status
+            )
         if verdict.is_challenge:
             raise ProviderError(
                 "challenge_unresolved",
@@ -602,18 +681,16 @@ class BaseProvider:
                 f"{self.id}: status {solved.status} via Byparr",
                 http_status=solved.status,
             )
-        return await self._parse_page(
-            ProviderPage(
+        return LoadedPage(
+            page=ProviderPage(
                 url=solved.url,
                 html=solved.html,
                 status=solved.status,
-                release_title=ctx.release_title,
+                release_title=release_title,
             ),
-            content,
-            ctx,
-            started=started,
-            http_status=solved.status,
             via="byparr",
+            cookies=solved.cookies,
+            user_agent=solved.user_agent,
         )
 
     async def _parse_page(
