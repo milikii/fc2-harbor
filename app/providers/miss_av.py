@@ -30,6 +30,7 @@ class MissAvProvider(BaseProvider):
     proxy_key = "miss_av"
     referer = "https://missav123.com/"
     CARD = ".thumbnail, .grid .item, .item"
+    REQUIRED_SELECTORS = (CARD,)
 
     def build_url(self, content: Content) -> str:
         return f"https://{self.host}/search/{quote(content_code(content))}"
@@ -42,8 +43,12 @@ class MissAvProvider(BaseProvider):
 
         for card in cards:
             link = card.css_first("a[href]")
-            title_node = card.css_first(".text-secondary, .title, a") or link
+            # On the live search page the cover anchor comes first and has no text;
+            # the title lives in its own ``.text-secondary`` anchor further down.
+            title_node = card.css_first(".text-secondary") or card.css_first(".title") or link
             title = clean_text(title_node.text(strip=True)) if title_node else None
+            if not title and link is not None:
+                title = clean_text(link.attributes.get("alt"))
             if not code_matches(title, content):
                 continue
             image = card.css_first("img")

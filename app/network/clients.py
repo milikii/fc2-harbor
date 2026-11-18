@@ -8,6 +8,9 @@ Rules encoded here:
 * **Per-domain concurrency** (default 2) and rate limiting, keyed by hostname.
 * **Retry only idempotent GETs**, at most ``retries`` times, exponential backoff
   with jitter, and ``Retry-After`` is honoured (seconds or HTTP date, capped).
+  POST is a form submission: exactly one attempt, no retry.
+* **Cookies are per request.** A follow-up request can replay cookies solved by
+  Byparr; they are passed explicitly and never logged.
 * **Conditional requests**: the caller supplies ``If-None-Match`` /
   ``If-Modified-Since`` and gets a 304 back without a body.
 * Strict timeouts; a failed request raises, it never kills the process (spec 20).
@@ -264,6 +267,94 @@ class HttpClient:
 
         # Unreachable: the loop either returns or raises.
         raise HttpNetworkError(f"request to {domain} failed", url=url) from last_error
+
+    async def post(
+        self,
+        url: str,
+        *,
+        data: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        cookies: Mapping[str, str] | None = None,
+        proxy_url: str | None = None,
+        proxy_label: str | None = None,
+        proxy_region: str | None = None,
+    ) -> HttpResponse:
+        """One POST, never retried: a form submission is not idempotent.
+
+        ``cookies`` are values solved by Byparr; they are sent on this request
+        and never logged.
+        """
+
+        domain = urlsplit(url).hostname or "unknown"
+        started = time.monotonic()
+        request_headers = dict(headers or {})
+        if cookies:
+            # Sent as a header rather than ``cookies=``: httpx deprecates
+            # per-request cookies, and these values must not outlive the call.
+            request_headers["Cookie"] = "; ".join(
+                f"{name}={value}" for name, value in cookies.items()
+            )
+        try:
+            async with self._limiter.slot(domain):
+                response = await self._client_for(proxy_url).post(
+                    url,
+                    data=dict(data or {}),
+                    headers=request_headers,
+                )
+        except httpx.HTTPError as exc:
+            if self._metrics is not None and proxy_label:
+                self._metrics.record_proxy(
+                    proxy_label,
+                    region=proxy_region,
+                    ok=False,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    error=type(exc).__name__,
+                )
+            _log.warning(
+                "http.request_failed",
+                domain=domain,
+                method="POST",
+                attempt=1,
+                error_code=type(exc).__name__,
+                error_detail=error_detail(exc),
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise HttpNetworkError(
+                f"request to {domain} failed: {type(exc).__name__}: {error_detail(exc)}",
+                url=url,
+            ) from exc
+
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if self._metrics is not None and proxy_label:
+            self._metrics.record_proxy(
+                proxy_label,
+                region=proxy_region,
+                ok=response.status_code < 500,
+                latency_ms=latency_ms,
+                error=None if response.status_code < 500 else f"http_{response.status_code}",
+            )
+        _log.info(
+            "http.request",
+            domain=domain,
+            method="POST",
+            status=response.status_code,
+            latency_ms=latency_ms,
+            attempt=1,
+        )
+
+        if response.status_code >= 400:
+            raise HttpError(
+                f"{domain} answered {response.status_code}",
+                status=response.status_code,
+                url=url,
+            )
+
+        return HttpResponse(
+            url=str(response.url),
+            status=response.status_code,
+            content=response.content,
+            headers=dict(response.headers),
+        )
 
     @asynccontextmanager
     async def stream(

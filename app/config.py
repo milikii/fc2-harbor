@@ -543,6 +543,18 @@ class ProviderSection(_FrozenModel):
     #: false: measurement showed no free source has a full FC2 description
     #: (docs/deviations.md §35). The merge rule itself always applies.
     seek_full_description: bool = False
+    #: Optional FlareSolverr-protocol endpoint (Byparr). Empty/None disables the
+    #: whole path: HTTP behaviour is then exactly what it was before. When set,
+    #: only the P0 pilot sources (miss_av, fc2_hub) may use it, and only after a
+    #: challenge; a source without a proxy is refused instead of going direct.
+    flaresolverr_url: str | None = None
+
+    @field_validator("flaresolverr_url")
+    @classmethod
+    def _check_flaresolverr_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_http_url(value, "provider.flaresolverr_url")
 
     @field_validator("priorities")
     @classmethod

@@ -34,7 +34,7 @@ Rules:
 |---|---|---|
 | `fc2.html` | Fc2 | article detail page (og:* meta tags, protocol-relative images) |
 | `fc2_article_with_description.html` | Fc2 | article page that embeds the description widget (truncated og:description + iframe) |
-| `fc2_hub.html` | fc2_hub | search result cards |
+| `fc2_hub.html` | fc2_hub | search redirect target: detail page (`h1`, `og:*`, `canonical`) |
 | `javdb.html` | Javdb | `.movie-list` grid |
 | `mmtv.html` | Mmtv | `.video-item` cards |
 | `freejavbt.html` | freejavbt | WordPress `article` |
