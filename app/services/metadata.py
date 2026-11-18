@@ -28,7 +28,12 @@ from app.db.session import Database
 from app.logging import get_logger
 from app.network.image_fetcher import FetchedImage, ImageFetcher, ImageFetchError
 from app.network.proxy import ProxyRouter
-from app.providers.coordinator import AggregatedMetadata, MetadataCoordinator, ProviderRun
+from app.providers.coordinator import (
+    NYAA_FALLBACK_PROVIDER,
+    AggregatedMetadata,
+    MetadataCoordinator,
+    ProviderRun,
+)
 from app.schemas.metadata import ProviderContext
 from app.services.cards import usable_description
 from app.services.translate import (
@@ -39,6 +44,7 @@ from app.services.translate import (
     OpenAITranslator,
     TranslationError,
     Translator,
+    text_digest,
 )
 
 _log = get_logger("metadata.service")
@@ -105,10 +111,14 @@ def derive_image_allowlist(settings: Settings) -> list[str]:
     return sorted(host for host in hosts if host)
 
 
-#: Provider id of the Nyaa page fallback (``app/providers/nyaa_fallback.py``).
-NYAA_FALLBACK_PROVIDER = "Nyaa"
-#: The only provider whose description is shown on a card / worth translating.
-OFFICIAL_DESCRIPTION_PROVIDER = "Fc2"
+@dataclass(frozen=True, slots=True)
+class PersistedMetadata:
+    """What the ``contents`` row actually holds after the merge was persisted."""
+
+    title_ja: str | None
+    title_zh: str | None
+    description_ja: str | None
+    description_source: str | None
 
 
 class MetadataService:
@@ -139,9 +149,9 @@ class MetadataService:
         aggregated = await self.coordinator.aggregate(content, ctx)
         result.provider_runs = aggregated.runs
 
-        await self._persist_metadata(content_id, aggregated)
-        result.title_ja = aggregated.title_ja
-        result.description_ja = aggregated.description_ja
+        persisted = await self._persist_metadata(content_id, aggregated)
+        result.title_ja = persisted.title_ja
+        result.description_ja = persisted.description_ja
         result.official_url = aggregated.official_url
         result.censorship = aggregated.censorship
 
@@ -150,16 +160,18 @@ class MetadataService:
         result.preview_asset_ids = preview_ids
         result.image_errors = errors
 
-        # Only the official FC2 description is worth translating: a Nyaa post is a
-        # seller ad or a pile of image links (deviation §58).
-        translate_source = (
-            aggregated.description_ja
-            if aggregated.sources.get("description_ja") == OFFICIAL_DESCRIPTION_PROVIDER
-            else None
-        )
-        translated = await self._translate(content_id, translate_source)
+        # Any selected description is worth translating now, not only the FC2 body:
+        # a trusted provider summary is just as valid. ``_translate`` keeps the junk
+        # filter, so a Nyaa seller ad or a pile of image links is still never
+        # translated (deviation §58 is superseded, not the filter).
+        translated = await self._translate(content_id, persisted.description_ja)
         result.description_zh = translated
         result.translated = bool(translated)
+        # Title and description translations fail independently: a title failure
+        # must not throw away the description translation, and ``title_ja`` is never
+        # overwritten.
+        await self._translate_title(content_id, persisted.title_ja)
+        await self._refresh_status(content_id)
         return result
 
     # -- loading ------------------------------------------------------------
@@ -193,15 +205,27 @@ class MetadataService:
 
     # -- persistence --------------------------------------------------------
 
-    async def _persist_metadata(self, content_id: str, aggregated: AggregatedMetadata) -> None:
+    async def _persist_metadata(
+        self, content_id: str, aggregated: AggregatedMetadata
+    ) -> PersistedMetadata:
         async with self.db.transaction() as session:
             content = await session.get(Content, content_id)
             if content is None:
-                return
+                return PersistedMetadata(None, None, None, None)
             if aggregated.title_ja and not content.title_ja:
                 content.title_ja = aggregated.title_ja
+            description_source = aggregated.sources.get("description_ja")
             if aggregated.description_ja and not content.description_ja:
                 content.description_ja = aggregated.description_ja
+                content.description_source = description_source
+            elif (
+                content.description_ja
+                and content.description_source is None
+                and content.description_ja == aggregated.description_ja
+            ):
+                # Rows enriched before 0006 never stored the source: backfill it so
+                # a Nyaa uploader post can be labelled non-official on the card.
+                content.description_source = description_source
             if aggregated.official_url and not content.official_url:
                 content.official_url = aggregated.official_url
             if (
@@ -229,6 +253,13 @@ class MetadataService:
                         asset_count=run.asset_count,
                     )
                 )
+
+            return PersistedMetadata(
+                title_ja=content.title_ja,
+                title_zh=content.title_zh,
+                description_ja=content.description_ja,
+                description_source=content.description_source,
+            )
 
     # -- assets -------------------------------------------------------------
 
@@ -359,14 +390,16 @@ class MetadataService:
             # and would only produce junk on the card (deviation §58).
             _log.info("metadata.translate_skipped_junk", content_id=content_id)
             return None
+        digest = text_digest(description)
         async with self.db.session() as session:
             content = await session.get(Content, content_id)
             if content is None:
                 return None
-            # Only a *real* translation counts as cached. An empty string is the
-            # residue of an earlier failure and must be retried, so this is an
-            # explicit "non-empty" check, never `is None`.
-            if content.description_zh and content.description_zh.strip():
+            # The cache is bound to the source text: a translation made from an
+            # older description is stale once ``description_ja`` changes. An empty
+            # string is the residue of an earlier failure and is retried.
+            cached = (content.description_zh or "").strip()
+            if cached and content.description_zh_source_hash == digest:
                 return content.description_zh
         try:
             translated = await self.translator.translate(description)
@@ -379,10 +412,69 @@ class MetadataService:
             return None
         async with self.db.transaction() as session:
             content = await session.get(Content, content_id)
-            if content is not None and not (content.description_zh or "").strip():
+            # Only bind the translation when the stored description is still the
+            # text it was made from (or not stored yet); a concurrent merge must
+            # not inherit it.
+            if content is not None and (
+                not (content.description_ja or "").strip()
+                or text_digest(content.description_ja) == digest
+            ):
                 content.description_zh = translated
+                content.description_zh_source_hash = digest
                 content.updated_at = utcnow()
         return translated
+
+    async def _translate_title(self, content_id: str, title: str | None) -> str | None:
+        """Translate the title through the same translator, independently.
+
+        A failure only leaves the card without a Chinese title line: ``title_ja``
+        is never overwritten with a translation.
+        """
+
+        if self.translator is None or not title or not title.strip():
+            return None
+        async with self.db.session() as session:
+            content = await session.get(Content, content_id)
+            if content is None:
+                return None
+            if content.title_zh and content.title_zh.strip():
+                return content.title_zh
+        try:
+            translated = await self.translator.translate(title)
+        except TranslationError as exc:
+            if self.metrics is not None:
+                self.metrics.inc("translations.failed")  # type: ignore[attr-defined]
+            _log.warning(
+                "metadata.title_translate_failed", content_id=content_id, error_code=exc.code
+            )
+            return None
+        if not translated:
+            return None
+        async with self.db.transaction() as session:
+            content = await session.get(Content, content_id)
+            if content is not None and (content.title_ja or "") == title:
+                content.title_zh = translated
+                content.updated_at = utcnow()
+        return translated
+
+    async def _refresh_status(self, content_id: str) -> None:
+        """Recompute ``metadata_status`` after the translations ran.
+
+        With translation enabled a card is only complete when the title has a
+        Chinese line too; a missing translation stays PARTIAL so the next publisher
+        round retries it.
+        """
+
+        async with self.db.transaction() as session:
+            content = await session.get(Content, content_id)
+            if content is None:
+                return
+            complete = bool(content.title_ja and content.description_ja)
+            if complete and self.translator is not None and not content.title_zh:
+                complete = False
+            content.metadata_status = (
+                MetadataStatus.COMPLETE if complete else MetadataStatus.PARTIAL
+            )
 
 
 def build_translator(settings: Settings) -> Translator | None:

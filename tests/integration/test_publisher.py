@@ -101,8 +101,9 @@ async def seed(db: Database, tmp_path: Path, *, previews: int = 2, cover: bool =
         )
         session.add(content)
         await session.flush()
-        # The card's 📝 line only shows the FC2 provider's description, so every
-        # seeded content needs that row (deviation §58).
+        # The card's 📝 line shows the selected description; description_source
+        # is NULL on these seeds, so it is treated as the official FC2 body.
+        # (deviation §58)
         session.add(
             ProviderResult(
                 content_id=content.id,
@@ -208,8 +209,9 @@ async def test_card_with_cover_and_previews(db: Database, tmp_path: Path) -> Non
     chat_id, _photo, caption, _poster_id = bot.photos[0]
     assert chat_id == settings.telegram.allowed_user_ids[0]
     assert caption and "FC2-PPV-1234567" in caption
-    # One 📝 block: the Chinese translation wins over the Japanese text.
-    assert caption and "📝 作品说明，这是一段足够长的中文介绍，用来通过长度门槛。" in caption
+    # Both languages are shown: the translation is an addition to the original.
+    assert caption and "📝 作品の説明です。" in caption
+    assert caption and "🇨🇳 作品说明，这是一段足够长的中文介绍，用来通过长度门槛。" in caption
     assert len(bot.groups) == 1
     assert len(bot.groups[0][1]) == 2
 
@@ -303,9 +305,9 @@ async def test_long_content_truncates_the_caption_and_sends_the_full_text(
     assert "…" in caption
     assert "あ" * 260 not in caption  # caption keeps only the identifying block
     assert "中" * 260 not in caption
-    # The complete body (translation wins) follows as one text message.
+    # The complete body (original + translation) follows as one text message.
     assert len(bot.messages) == 1
-    assert bot.messages[0][1] == f"📝 {'中' * 2000}"
+    assert bot.messages[0][1] == f"📝 {'あ' * 2000}\n🇨🇳 {'中' * 2000}"
 
 
 async def test_overflow_falls_back_to_follow_up_messages(db: Database, tmp_path: Path) -> None:
@@ -564,9 +566,7 @@ async def test_text_only_card_uses_html_parse_mode(db: Database, tmp_path: Path)
     assert bot.parse_modes == [("message", "HTML")]
 
 
-async def test_markup_in_content_is_escaped_before_sending(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_markup_in_content_is_escaped_before_sending(db: Database, tmp_path: Path) -> None:
     """A title with ``<``/``&`` must not break the HTML message."""
 
     settings = make_settings(
@@ -666,9 +666,7 @@ async def test_cover_gate_is_logged(db: Database, tmp_path: Path) -> None:
     assert "publisher.cover_give_up" in events
 
 
-async def test_card_with_cover_is_published_and_marked_ready(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_card_with_cover_is_published_and_marked_ready(db: Database, tmp_path: Path) -> None:
     settings = make_settings(tmp_path, telegram={"allowed_user_ids": "111"})
     content_id = await seed(db, tmp_path, cover=True, previews=0)
     bot = FakeBot()
@@ -684,9 +682,7 @@ async def test_card_with_cover_is_published_and_marked_ready(
     assert content.cover_status == CoverStatus.READY.value
 
 
-async def test_require_cover_false_keeps_the_text_only_card(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_require_cover_false_keeps_the_text_only_card(db: Database, tmp_path: Path) -> None:
     settings = make_settings(
         tmp_path,
         telegram={"allowed_user_ids": "111"},
@@ -703,7 +699,7 @@ async def test_require_cover_false_keeps_the_text_only_card(
     assert len(bot.messages) == 1
 
 
-# -- 📝 only shows the official FC2 description -------------------------------
+# -- 📝 shows the selected description, labelled when it is not official ----
 
 
 async def seed_without_official_description(db: Database, tmp_path: Path) -> str:
@@ -724,9 +720,7 @@ async def seed_without_official_description(db: Database, tmp_path: Path) -> str
     return content_id
 
 
-async def test_a_missing_official_description_omits_the_line(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_a_missing_official_description_omits_the_line(db: Database, tmp_path: Path) -> None:
     """The Nyaa post is a seller ad — never used as the plot."""
 
     settings = make_settings(

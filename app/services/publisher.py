@@ -23,15 +23,17 @@ from sqlalchemy import select
 from app.bots.keyboards import card_keyboard
 from app.config import Settings
 from app.db.enums import AssetRole, CoverStatus, MetadataStatus, NotificationStatus
-from app.db.models import Asset, Content, ProviderResult, Release
+from app.db.models import Asset, Content, Release
 from app.db.session import Database
 from app.logging import get_logger
+from app.providers.coordinator import OFFICIAL_DESCRIPTION_PROVIDER
 from app.schemas.release import ReleaseCandidate  # noqa: F401  (typing reference)
 from app.services import notifications as notification_store
 from app.services.cards import PARSE_MODE, CardSource, build_card_messages
 from app.services.metadata import MetadataService
 from app.services.push_queue import PushCandidate, find_pending_push_candidates
 from app.services.telegram_assets import TelegramAssetUploader, TelegramUploadError
+from app.services.translate import text_digest
 
 _log = get_logger("publisher")
 
@@ -173,9 +175,7 @@ class Publisher:
         keyboard = card_keyboard(content_id, card.official_url)
 
         if poster_id is None:
-            poster_id = await self._send_poster(
-                chat_id, card, cover, messages.caption, keyboard
-            )
+            poster_id = await self._send_poster(chat_id, card, cover, messages.caption, keyboard)
             async with self.db.transaction() as session:
                 await notification_store.record_progress(
                     session, notification_id, poster_message_id=poster_id
@@ -326,9 +326,20 @@ class Publisher:
             or candidate.source_url
             or f"https://sukebei.nyaa.si/view/{candidate.source_item_id}"
         )
-        # ``📝`` only ever shows the official FC2 description: Nyaa posts are
-        # seller ads and image links (deviation §58).
-        official_description = await self._official_description(content.id)
+        # ``📝`` shows the description the enrichment selected and persisted, not
+        # only an FC2 body: a trusted provider summary or a cleaned Nyaa plot is
+        # valid too. The translation is only shown when its source digest still
+        # matches the stored description (a stale translation is hidden).
+        description_ja = content.description_ja
+        description_source = content.description_source
+        description_zh = content.description_zh
+        if not description_zh or not description_zh.strip():
+            description_zh = None
+        elif (
+            content.description_zh_source_hash is not None
+            and content.description_zh_source_hash != text_digest(description_ja)
+        ):
+            description_zh = None
         # Both values come from the release row already loaded by ``_load``: no
         # extra query per card.
         size_text = None
@@ -343,9 +354,10 @@ class Publisher:
             canonical_key=content.canonical_key,
             display_code=content.display_code or content.canonical_key,
             title=content.title_ja,
-            description_ja=official_description,
-            # The translation only makes sense for the official text.
-            description_zh=content.description_zh if official_description else None,
+            title_zh=content.title_zh,
+            description_ja=description_ja,
+            description_zh=description_zh,
+            description_official=(description_source in (None, OFFICIAL_DESCRIPTION_PROVIDER)),
             censorship=content.censorship,
             nyaa_url=nyaa_url,
             official_url=content.official_url,
@@ -353,26 +365,6 @@ class Publisher:
             published_at=published_at,
             timezone=self.settings.app.timezone,
         )
-
-    async def _official_description(self, content_id: str) -> str | None:
-        """The description the FC2 provider stored for this content, if any."""
-
-        async with self.db.session() as session:
-            rows = await session.scalars(
-                select(ProviderResult)
-                .where(
-                    ProviderResult.content_id == content_id,
-                    ProviderResult.provider == "Fc2",
-                    ProviderResult.success.is_(True),
-                )
-                .order_by(ProviderResult.fetched_at.desc())
-            )
-            for row in rows:
-                payload = row.result_json or {}
-                description = payload.get("description_ja")
-                if isinstance(description, str) and description.strip():
-                    return description
-        return None
 
     async def _defer_missing_cover(self, content_id: str) -> None:
         """Count the attempt and stop retrying once the limit is reached."""
