@@ -216,6 +216,118 @@ def test_no_matching_entry_returns_none(cls: type[BaseProvider], fixture: str, u
     assert provider(cls).parse(page(fixture, url), make_content("7654321")) is None
 
 
+async def test_miss_av_detail_fills_a_missing_card_description() -> None:
+    """The card has no plot, so the matched card's detail page supplies it."""
+
+    search = (FIXTURES / "miss_av.html").read_text(encoding="utf-8")
+    detail = (FIXTURES / "miss_av_detail.html").read_text(encoding="utf-8")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        body = detail if "/en/fc2-ppv-1234567" in str(request.url) else search
+        return httpx.Response(200, content=body, headers={"content-type": "text/html"})
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = MissAvProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert result is not None
+    assert result.description_ja and "詳細ページの作品紹介" in result.description_ja
+    assert result.description_quality == "summary"
+    assert len(requested) == 2
+    assert requested[1] == "https://missav123.com/en/fc2-ppv-1234567"
+
+
+async def test_miss_av_card_description_skips_the_detail_page() -> None:
+    """A card that already carries a plot costs exactly one request."""
+
+    search = (
+        (FIXTURES / "miss_av.html")
+        .read_text(encoding="utf-8")
+        .replace(
+            "</div>\n</body>",
+            '<p class="description">カードの説明です。</p>\n</div>\n</body>',
+        )
+    )
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200, content=search, headers={"content-type": "text/html"})
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = MissAvProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert result is not None
+    assert result.description_ja == "カードの説明です。"
+    assert len(requested) == 1
+
+
+async def test_miss_av_detail_for_another_number_is_rejected() -> None:
+    """A detail page about a different video must not supply the description."""
+
+    search = (FIXTURES / "miss_av.html").read_text(encoding="utf-8")
+    detail = _retitle(
+        (FIXTURES / "miss_av_detail.html").read_text(encoding="utf-8"), "FC2-PPV-7654321"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = detail if "/en/fc2-ppv-1234567" in str(request.url) else search
+        return httpx.Response(200, content=body, headers={"content-type": "text/html"})
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = MissAvProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert result is not None
+    assert result.title_ja
+    assert result.description_ja is None
+
+
+@pytest.mark.parametrize("failure", ["status", "network"])
+async def test_miss_av_detail_failure_degrades_to_no_description(failure: str) -> None:
+    """A broken detail page never turns a found entry into a failed source."""
+
+    search = (FIXTURES / "miss_av.html").read_text(encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/en/fc2-ppv-1234567" in str(request.url):
+            if failure == "network":
+                raise httpx.ConnectError("detail unreachable", request=request)
+            return httpx.Response(500)
+        return httpx.Response(200, content=search, headers={"content-type": "text/html"})
+
+    client = HttpClient(transport=httpx.MockTransport(handler), retries=0)
+    instance = MissAvProvider(client=client, proxy_url=None, timeout_seconds=5)
+    try:
+        result = await instance.fetch(
+            make_content(), ProviderContext(canonical_key="fc2_ppv:1234567")
+        )
+    finally:
+        await client.aclose()
+
+    assert result is not None
+    assert result.title_ja
+    assert result.description_ja is None
+
+
 def test_miss_av_live_card_uses_the_separate_title_anchor() -> None:
     """The live search card's cover anchor comes first and has no text.
 

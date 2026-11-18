@@ -28,7 +28,8 @@ Rules:
     (`.video-list-item > .card`, `h5.card-title` + `p.card-text`, lazy `data-src`),
     `madou_not_found.html` (200 + 404 panel);
   - still constructed: `fc2_hub.html`, `javlibrary.html`, `miss_av.html`,
-    `avsox.html` (403 / JS challenge from the build environment).
+    `miss_av_detail.html`, `avsox.html` (403 / JS challenge from the build
+    environment).
 
 | File | Provider | Shape |
 |---|---|---|
@@ -38,7 +39,8 @@ Rules:
 | `javdb.html` | Javdb | `.movie-list` grid |
 | `mmtv.html` | Mmtv | `.video-item` cards |
 | `freejavbt.html` | freejavbt | WordPress `article` |
-| `miss_av.html` | miss_av | thumbnail grid |
+| `miss_av.html` | miss_av | thumbnail grid (card carries no plot) |
+| `miss_av_detail.html` | miss_av | detail page reached from a matched card (`h1`, `og:title`, `canonical`, `.description`) |
 | `javlibrary.html` | Javlibrary | detail page with jacket + previews |
 | `avsox.html` | avsox | `#waterfall` grid |
 | `madou.html` | Madou | WordPress `article` |

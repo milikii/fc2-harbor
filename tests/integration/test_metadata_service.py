@@ -28,7 +28,7 @@ from app.services.metadata import (
     normalize_image_url,
     registered_domain,
 )
-from app.services.translate import OpenAITranslator
+from app.services.translate import OpenAITranslator, text_digest
 from PIL import Image
 from sqlalchemy import func, select
 
@@ -317,9 +317,7 @@ class _FailingTranslator:
         raise TranslationError("non_json", "blocked: HTML interstitial")
 
 
-async def test_translation_failure_leaves_description_empty(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_translation_failure_leaves_description_empty(db: Database, tmp_path: Path) -> None:
     content_id = await seed_content(db)
     settings = direct_provider_settings(tmp_path)
     service = build_service(db, settings, tmp_path)
@@ -328,7 +326,8 @@ async def test_translation_failure_leaves_description_empty(
 
     result_obj = await service.enrich(content_id)
 
-    assert translator.calls == 1
+    # Description and title are translated independently: two calls, two failures.
+    assert translator.calls == 2
     assert result_obj.description_zh is None
     assert result_obj.metadata_complete is True
     async with db.session() as session:
@@ -336,6 +335,9 @@ async def test_translation_failure_leaves_description_empty(
         assert content is not None
         assert content.description_ja == SAMPLE_JA
         assert content.description_zh is None
+        # A failed title translation keeps the original and adds nothing.
+        assert content.title_ja == "FC2-PPV-1234567 タイトル"
+        assert content.title_zh is None
 
 
 def test_build_translator_wires_the_google_endpoint_and_proxy(
@@ -411,9 +413,7 @@ def service_with(
     return service
 
 
-async def test_translation_runs_for_a_present_description(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_translation_runs_for_a_present_description(db: Database, tmp_path: Path) -> None:
     content_id = await seed_content(db)
     settings = direct_provider_settings(tmp_path)
     translator = _CountingTranslator()
@@ -463,12 +463,62 @@ async def test_cached_translation_is_reused(db: Database, tmp_path: Path) -> Non
         content = await session.get(Content, content_id)
         assert content is not None
         content.description_zh = "已有译文"
+        content.description_zh_source_hash = text_digest(SAMPLE_JA)
 
     translator = _CountingTranslator("新しい訳")
     service = service_with(db, settings, tmp_path, translator)
 
     assert await service._translate(content_id, SAMPLE_JA) == "已有译文"
     assert translator.calls == []
+
+
+async def test_a_changed_description_invalidates_the_cache(db: Database, tmp_path: Path) -> None:
+    """The cache is bound to the source text, not just to a non-empty value."""
+
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_ja = SAMPLE_JA
+        content.description_zh = "旧译文"
+        content.description_zh_source_hash = text_digest(SAMPLE_JA)
+
+    changed = "新しい説明文です。これは十分に長い文章で、再翻訳の対象になります。"
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.description_ja = changed
+
+    translator = _CountingTranslator("新译文")
+    service = service_with(db, settings, tmp_path, translator)
+
+    assert await service._translate(content_id, changed) == "新译文"
+    assert translator.calls == [changed]
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.description_zh == "新译文"
+    assert content.description_zh_source_hash == text_digest(changed)
+
+
+async def test_title_translation_never_overwrites_the_original(
+    db: Database, tmp_path: Path
+) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    service = service_with(db, settings, tmp_path, _CountingTranslator("中文标题"))
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.title_ja = "FC2-PPV-1234567 タイトル"
+
+    assert await service._translate_title(content_id, content.title_ja) == "中文标题"
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None
+    assert content.title_ja == "FC2-PPV-1234567 タイトル"
+    assert content.title_zh == "中文标题"
 
 
 async def test_empty_string_residue_is_retranslated(db: Database, tmp_path: Path) -> None:
@@ -492,9 +542,7 @@ async def test_empty_string_residue_is_retranslated(db: Database, tmp_path: Path
     assert content.description_zh == "重新翻译"
 
 
-async def test_fallback_description_reaches_the_translator(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_fallback_description_reaches_the_translator(db: Database, tmp_path: Path) -> None:
     """A description that only the Nyaa fallback supplied must still be translated."""
 
     content_id = await seed_content(db)
@@ -507,9 +555,7 @@ async def test_fallback_description_reaches_the_translator(
         assert content is not None
         content.description_zh = None
 
-    translated = await service._translate(
-        content_id, FALLBACK_JA
-    )
+    translated = await service._translate(content_id, FALLBACK_JA)
     assert translator.calls == [FALLBACK_JA]
     assert translated == "回退译文"
 
@@ -553,9 +599,7 @@ async def test_viewer_resolution_is_only_enabled_for_nyaa_images(
 # -- only the official description is translated ------------------------------
 
 
-async def test_a_url_only_description_is_not_translated(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_a_url_only_description_is_not_translated(db: Database, tmp_path: Path) -> None:
     """No point spending a request on a bare image URL."""
 
     content_id = await seed_content(db)
@@ -571,9 +615,7 @@ async def test_a_url_only_description_is_not_translated(
     assert translator.calls == []
 
 
-async def test_a_promotional_description_is_not_translated(
-    db: Database, tmp_path: Path
-) -> None:
+async def test_a_promotional_description_is_not_translated(db: Database, tmp_path: Path) -> None:
     content_id = await seed_content(db)
     settings = direct_provider_settings(tmp_path)
     translator = _CountingTranslator()

@@ -101,8 +101,14 @@ class Content(Base):
     canonical_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     display_code: Mapped[str | None] = mapped_column(String(255))
     title_ja: Mapped[str | None] = mapped_column(Text)
+    #: Chinese title; ``title_ja`` itself is never overwritten by a translation.
+    title_zh: Mapped[str | None] = mapped_column(Text)
     description_ja: Mapped[str | None] = mapped_column(Text)
     description_zh: Mapped[str | None] = mapped_column(Text)
+    #: SHA-256 of the ``description_ja`` that ``description_zh`` was made from.
+    description_zh_source_hash: Mapped[str | None] = mapped_column(String(64))
+    #: Provider id that supplied ``description_ja`` (``Fc2``, ``Nyaa``, …).
+    description_source: Mapped[str | None] = mapped_column(String(32))
     censorship: Mapped[Censorship] = mapped_column(
         enum_column(Censorship, "censorship"), nullable=False, default=Censorship.UNKNOWN
     )

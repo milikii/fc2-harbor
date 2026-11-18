@@ -72,9 +72,21 @@ def test_card_layout_matches_the_legacy_template() -> None:
         "サンプル作品タイトル\n"
         "💾 3.72 GiB · 🕒 2025-11-15 03:01\n"
         "\n"
-        "📝 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。\n"
+        "📝 素人初撮り。19歳の大学生が人生で初めての撮影に挑戦しました。\n"
+        "🇨🇳 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。\n"
         '<a href="https://sukebei.nyaa.si/view/4761220">nyaa</a>'
     )
+
+
+def test_the_title_is_bilingual_when_a_translation_exists() -> None:
+    caption = build_card_messages(card(title_zh="中文标题示例")).caption
+    assert "中文标题示例\nサンプル作品タイトル" in caption
+
+
+def test_without_a_translation_the_title_is_the_original_only() -> None:
+    caption = build_card_messages(card()).caption
+    assert "サンプル作品タイトル" in caption
+    assert caption.splitlines()[3] == "サンプル作品タイトル"
 
 
 def test_code_is_bold_on_the_first_line() -> None:
@@ -120,7 +132,7 @@ def test_link_renders_as_anchor_text() -> None:
 def test_missing_link_drops_the_line() -> None:
     caption = build_card_messages(card(nyaa_url="")).caption
     assert "<a href" not in caption
-    assert caption.endswith("📝 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。")
+    assert caption.endswith("🇨🇳 素人首次拍摄。19岁的大学生第一次挑战拍摄工作。")
 
 
 def test_naive_timestamp_is_read_as_utc() -> None:
@@ -170,9 +182,7 @@ def test_description_markup_is_escaped() -> None:
 
 
 def test_url_in_the_anchor_is_escaped() -> None:
-    caption = build_card_messages(
-        card(nyaa_url="https://sukebei.nyaa.si/view/1?a=1&b=2")
-    ).caption
+    caption = build_card_messages(card(nyaa_url="https://sukebei.nyaa.si/view/1?a=1&b=2")).caption
     assert 'href="https://sukebei.nyaa.si/view/1?a=1&amp;b=2"' in caption
 
 
@@ -211,10 +221,13 @@ def test_overflow_caption_keeps_a_truncated_preview() -> None:
     long_zh = "中" * 2000
     messages = build_card_messages(card(description_ja=long_ja, description_zh=long_zh))
 
-    # One 📝 block: the translation wins and is previewed at 250 characters.
-    preview = messages.caption.split("📝 ")[1].split("\n")[0]
-    assert len(preview) == CARD_DESCRIPTION_MAX and preview.endswith("…")
-    assert "🇨🇳" not in messages.caption
+    # Both lines are previewed at 250 characters — the translation is an addition.
+    preview = messages.caption.split("📝 ")[1]
+    japanese, chinese = preview.split("\n")[:2]
+    assert len(japanese) == CARD_DESCRIPTION_MAX and japanese.endswith("…")
+    assert chinese.startswith("🇨🇳 ")
+    assert len(chinese.removeprefix("🇨🇳 ")) == CARD_DESCRIPTION_MAX
+    assert chinese.endswith("…")
     assert len(messages.caption) <= CAPTION_LIMIT
 
 
@@ -233,7 +246,7 @@ def test_overflow_sends_the_complete_translation_untruncated() -> None:
     messages = build_card_messages(card(description_ja=None, description_zh=long_zh))
 
     assert messages.has_overflow is True
-    assert messages.extra_texts[0] == f"📝 {long_zh}"
+    assert messages.extra_texts[0] == f"🇨🇳 {long_zh}"
 
 
 def test_caption_title_is_truncated_when_it_does_not_fit() -> None:
@@ -285,15 +298,22 @@ def test_overflow_sends_one_complete_body_message() -> None:
     assert messages.extra_texts[0].startswith("📝 ")
 
 
-def test_chinese_translation_wins_over_the_japanese_text() -> None:
+def test_japanese_and_chinese_are_both_shown() -> None:
+    """The translation is an addition; the original never disappears."""
+
     messages = build_card_messages(
         card(
             description_ja="日本語の説明です。これは十分に長い説明文です。",
             description_zh="这是中文翻译，足够长的一段说明文字，用来通过长度门槛。",
         )
     )
-    assert "📝 这是中文翻译，足够长的一段说明文字，用来通过长度门槛。" in messages.caption
-    assert "日本語の説明" not in messages.caption
+    assert "📝 日本語の説明です。これは十分に長い説明文です。" in messages.caption
+    assert "🇨🇳 这是中文翻译，足够长的一段说明文字，用来通过长度门槛。" in messages.caption
+
+
+def test_a_non_official_description_is_labelled() -> None:
+    caption = build_card_messages(card(description_official=False)).caption
+    assert "上传者简介，非官方" in caption
 
 
 def test_japanese_is_used_when_there_is_no_translation() -> None:
@@ -461,10 +481,13 @@ def test_the_title_is_truncated_to_two_hundred_characters() -> None:
 
 
 def test_the_description_is_truncated_to_two_hundred_fifty_characters() -> None:
-    caption = build_card_messages(card(description_zh="中" * 2000)).caption
-    block = caption.split("📝 ")[1].split("\n")[0]
-    assert len(block) == CARD_DESCRIPTION_MAX
-    assert block.endswith("…")
+    caption = build_card_messages(
+        card(description_ja="あ" * 2000, description_zh="中" * 2000)
+    ).caption
+    japanese, chinese = caption.split("📝 ")[1].split("\n")[:2]
+    assert len(japanese) == CARD_DESCRIPTION_MAX and japanese.endswith("…")
+    assert len(chinese.removeprefix("🇨🇳 ")) == CARD_DESCRIPTION_MAX
+    assert chinese.endswith("…")
 
 
 def test_the_size_falls_back_to_a_dash() -> None:

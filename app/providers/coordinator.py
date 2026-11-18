@@ -51,8 +51,14 @@ from app.providers.miss_av import MissAvProvider
 from app.providers.mmtv import MmtvProvider
 from app.providers.nyaa_fallback import NyaaFallbackProvider
 from app.schemas.metadata import AssetCandidate, MetadataResult, ProviderContext
+from app.services.translate import text_digest
 
 _log = get_logger("metadata")
+
+#: Provider id of the Nyaa page fallback (``app/providers/nyaa_fallback.py``).
+NYAA_FALLBACK_PROVIDER = "Nyaa"
+#: The official FC2 provider: its qualified body is the first description candidate.
+OFFICIAL_DESCRIPTION_PROVIDER = "Fc2"
 
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "Fc2": Fc2Provider,
@@ -90,6 +96,8 @@ class AggregatedMetadata:
     title_ja: str | None = None
     description_ja: str | None = None
     description_quality: Literal["full", "summary"] | None = None
+    #: SHA-256 of ``description_ja`` — binds the translation cache to the source text.
+    description_hash: str | None = None
     official_url: str | None = None
     censorship: Censorship = Censorship.UNKNOWN
     release_date: datetime | None = None
@@ -108,6 +116,7 @@ class AggregatedMetadata:
             "title_ja": self.title_ja,
             "description_ja": self.description_ja,
             "description_quality": self.description_quality,
+            "description_hash": self.description_hash,
             "official_url": self.official_url,
             "censorship": self.censorship.value,
             "release_date": self.release_date.isoformat() if self.release_date else None,
@@ -119,9 +128,20 @@ class AggregatedMetadata:
 
 
 def _description_wins(aggregated: AggregatedMetadata, result: MetadataResult) -> bool:
-    """``full`` replaces ``summary``; otherwise only an empty slot is filled."""
+    """Whether ``result``'s description replaces the one already merged.
+
+    Source order (deviation §58 superseded): a qualified FC2 body first, then a
+    trusted provider summary that matched the exact code, and Nyaa only as the last
+    candidate. A Nyaa ``full`` uploader post must never push out a trusted source's
+    ``summary`` — it is an ad or a pile of image links, not a plot.
+    """
 
     if aggregated.description_ja is None:
+        return True
+    if result.provider == NYAA_FALLBACK_PROVIDER:
+        return False
+    current_source = aggregated.sources.get("description_ja")
+    if current_source == NYAA_FALLBACK_PROVIDER:
         return True
     return (
         aggregated.description_quality == "summary"
@@ -458,6 +478,7 @@ class MetadataCoordinator:
             replaced = aggregated.description_ja is not None
             aggregated.description_ja = result.description_ja
             aggregated.description_quality = result.description_quality
+            aggregated.description_hash = text_digest(result.description_ja)
             aggregated.sources["description_ja"] = result.provider
             if replaced:
                 _log.info(

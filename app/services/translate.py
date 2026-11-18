@@ -18,6 +18,7 @@ Only idempotent GETs are retried (spec 8.3); the OpenAI POST is not.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
@@ -40,6 +41,19 @@ MYMEMORY_MAX_CHARS = 500
 #: preview anyway, and translating 1600 characters costs time for nothing.
 TRANSLATE_MAX_CHARS = 400
 GOOGLE_FREE_CLIENT = "dict-chrome-ex"
+
+
+def text_digest(text: str | None) -> str | None:
+    """SHA-256 of the text a translation was made from (``None`` for empty text).
+
+    The translation cache is bound to this digest: when ``description_ja`` changes
+    the old ``description_zh`` is stale and must be translated again.
+    """
+
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 
 #: URL length is finite: translate in sentence-aligned blocks, several per request.
 CHUNK_TARGET_CHARS = 900

@@ -38,6 +38,10 @@ META_LINE_TEMPLATE = "💾 {size} · 🕒 {published}"
 META_SIZE_ONLY_TEMPLATE = "💾 {size}"
 META_TIME_ONLY_TEMPLATE = "🕒 {published}"
 DESCRIPTION_PREFIX = "📝 "
+#: The Chinese line sits *next to* the Japanese one, never instead of it (spec 9.1).
+TRANSLATION_PREFIX = "🇨🇳 "
+#: A Nyaa post or a provider summary is the uploader's text, not the official plot.
+UPLOADER_NOTE = "⚠️ 上传者简介，非官方"
 #: A description made mostly of links, or carrying seller promotion, is not a plot.
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _PROMO_MARKERS = (
@@ -85,6 +89,10 @@ class CardSource:
     censorship: Censorship
     nyaa_url: str
     official_url: str | None
+    #: Chinese title; ``title`` (the original) is always shown as well.
+    title_zh: str | None = None
+    #: ``False`` for a Nyaa uploader post or a non-FC2 summary (adds a label).
+    description_official: bool = True
     #: ``releases.raw_payload_json["size"]`` as stored by the source, e.g. ``3.72 GiB``.
     size_text: str | None = None
     #: ``releases.published_at``; rendered in :attr:`timezone`.
@@ -174,11 +182,13 @@ def clean_card_title(card: CardSource, *, limit: int | None = None) -> str:
     return truncate(text, limit) if limit else text
 
 
-def usable_description(text: str | None) -> str | None:
+def usable_description(text: str | None, *, limit: int | None = None) -> str | None:
     """The description only if it reads like a plot, not links or an ad.
 
     Nyaa posts are often a pile of image URLs or a seller's promotion ("join my
     channel", "half price"); the old system never showed those, and neither do we.
+    ``limit`` truncates only after the junk checks, so a short ad cannot slip
+    through as a "long enough" preview.
     """
 
     value = clean_description(text)
@@ -193,7 +203,7 @@ def usable_description(text: str | None) -> str | None:
         return None
     if len(" ".join(without_links.split())) < MIN_DESCRIPTION_CHARS:
         return None
-    return value
+    return truncate(value, limit) if limit else value
 
 
 def clean_description(text: str | None, *, limit: int | None = None) -> str | None:
@@ -234,19 +244,36 @@ def meta_line(card: CardSource) -> str:
 
 
 def identity_block(card: CardSource, *, truncated: bool = False) -> str:
-    """``<b>code</b>``, the tag line, then title + meta — the part that always stays."""
+    """``<b>code</b>``, the tag line, then title + meta — the part that always stays.
+
+    With a Chinese title the title area is bilingual: the Chinese line first, the
+    original second. Without one it is exactly the old single line.
+    """
 
     lines = [CODE_LINE_TEMPLATE.format(code=escape_html(card.display_code))]
     lines.append(TAG_LINE_TEMPLATE.format(label=censorship_label(card.censorship)))
     limit = CARD_TITLE_MAX if truncated else None
-    title = escape_html(clean_card_title(card, limit=limit))
-    return f"{chr(10).join(lines)}\n\n{title}\n{meta_line(card)}"
+    titles: list[str] = []
+    chinese = clean_title_zh(card, limit=limit)
+    if chinese:
+        titles.append(escape_html(chinese))
+    titles.append(escape_html(clean_card_title(card, limit=limit)))
+    return f"{chr(10).join(lines)}\n\n{chr(10).join(titles)}\n{meta_line(card)}"
 
 
 def link_line(card: CardSource) -> str | None:
     if not card.nyaa_url:
         return None
     return LINK_TEMPLATE.format(url=html.escape(card.nyaa_url, quote=True))
+
+
+def clean_title_zh(card: CardSource, *, limit: int | None = None) -> str | None:
+    """The Chinese title line, or ``None`` when no translation was stored."""
+
+    value = collapse_whitespace(card.title_zh or "")
+    if not value:
+        return None
+    return truncate(value, limit) if limit else value
 
 
 def compact_caption(card: CardSource) -> str:
@@ -259,9 +286,9 @@ def compact_caption(card: CardSource) -> str:
     """
 
     blocks = [identity_block(card, truncated=True)]
-    description = clean_description(card_text(card), limit=CARD_DESCRIPTION_MAX)
+    description = card_text(card, limit=CARD_DESCRIPTION_MAX)
     if description:
-        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
+        blocks.append(escape_html(description))
 
     link = link_line(card)
     caption = "\n\n".join(blocks)
@@ -276,14 +303,24 @@ def compact_caption(card: CardSource) -> str:
     return f"{caption}\n{link}" if link else caption
 
 
-def card_text(card: CardSource) -> str | None:
-    """What the ``📝`` line shows: the Chinese translation, else the Japanese text.
+def card_text(card: CardSource, *, limit: int | None = None) -> str | None:
+    """The ``📝`` block: Japanese **and** Chinese, never either/or.
 
-    The old system printed one block, never both, and it never showed the Nyaa
-    seller's post — the publisher only puts the official FC2 description here.
+    The translation is an addition, not a replacement (spec 9.1 wants both). Each
+    line passes the junk filter independently, so a bad translation cannot drag the
+    original down with it. A non-official source is labelled after the body.
     """
 
-    return usable_description(card.description_zh) or usable_description(card.description_ja)
+    lines: list[str] = []
+    japanese = usable_description(card.description_ja, limit=limit)
+    chinese = usable_description(card.description_zh, limit=limit)
+    if japanese:
+        lines.append(f"{DESCRIPTION_PREFIX}{japanese}")
+    if chinese:
+        lines.append(f"{TRANSLATION_PREFIX}{chinese}")
+    if lines and not card.description_official:
+        lines.append(UPLOADER_NOTE)
+    return "\n".join(lines) if lines else None
 
 
 def description_messages(card: CardSource) -> tuple[str, ...]:
@@ -293,10 +330,10 @@ def description_messages(card: CardSource) -> tuple[str, ...]:
     preview is only a preview.
     """
 
-    description = clean_description(card_text(card))
+    description = card_text(card)
     if not description:
         return ()
-    return tuple(split_text(f"{DESCRIPTION_PREFIX}{escape_html(description)}"))
+    return tuple(split_text(escape_html(description)))
 
 
 def build_card_messages(card: CardSource) -> CardMessages:
@@ -307,6 +344,7 @@ def build_card_messages(card: CardSource) -> CardMessages:
         <b>FC2-PPV-1234567</b>
         🏷️ 无码
 
+        中文标题
         标题（≤200 字）
         💾 3.72 GiB · 🕒 2025-11-15 03:01
 
@@ -323,11 +361,11 @@ def build_card_messages(card: CardSource) -> CardMessages:
       text is lost: the preview only ever duplicates what is sent in full.
     """
 
-    description = clean_description(card_text(card))
+    description = card_text(card)
 
     blocks = [identity_block(card)]
     if description:
-        blocks.append(f"{DESCRIPTION_PREFIX}{escape_html(description)}")
+        blocks.append(escape_html(description))
 
     link = link_line(card)
     body = "\n\n".join(blocks)
