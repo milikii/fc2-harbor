@@ -277,6 +277,42 @@ async def test_provider_failure_is_recorded(db: Database, tmp_path: Path) -> Non
     assert content is not None and content.metadata_status is MetadataStatus.PARTIAL
 
 
+async def test_bare_number_title_needs_no_chinese_title(db: Database, tmp_path: Path) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    service = build_service(db, settings, tmp_path)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.title_ja = "FC2-PPV-1234567"
+        content.description_ja = SAMPLE_JA
+        content.title_zh = None
+
+    await service._refresh_status(content_id)
+
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None and content.metadata_status is MetadataStatus.COMPLETE
+
+
+async def test_title_with_text_still_needs_chinese_title(db: Database, tmp_path: Path) -> None:
+    content_id = await seed_content(db)
+    settings = direct_provider_settings(tmp_path)
+    service = build_service(db, settings, tmp_path)
+    async with db.transaction() as session:
+        content = await session.get(Content, content_id)
+        assert content is not None
+        content.title_ja = "FC2-PPV-1234567 タイトル"
+        content.description_ja = SAMPLE_JA
+        content.title_zh = None
+
+    await service._refresh_status(content_id)
+
+    async with db.session() as session:
+        content = await session.get(Content, content_id)
+    assert content is not None and content.metadata_status is MetadataStatus.PARTIAL
+
+
 def test_normalize_image_url_strips_fragment_and_normalises_host() -> None:
     assert (
         normalize_image_url("HTTPS://Img.Example.COM/a.jpg?x=1#frag")
