@@ -35,7 +35,7 @@ from app.providers.coordinator import (
     ProviderRun,
 )
 from app.schemas.metadata import ProviderContext
-from app.services.cards import usable_description
+from app.services.cards import CardSource, clean_card_title, usable_description
 from app.services.translate import (
     GOOGLE_FREE_ENDPOINT,
     FallbackTranslator,
@@ -457,12 +457,35 @@ class MetadataService:
                 content.updated_at = utcnow()
         return translated
 
+    @staticmethod
+    def _title_needs_chinese(content: Content) -> bool:
+        """True unless the title is nothing but the bare FC2 number.
+
+        ``clean_card_title`` falls back to ``display_code`` when the title carries
+        no text besides the code, so such a title has nothing to translate.
+        """
+
+        display_code = content.display_code or content.canonical_key
+        card = CardSource(
+            content_id=content.id,
+            canonical_key=content.canonical_key,
+            display_code=display_code,
+            title=content.title_ja,
+            description_ja=content.description_ja,
+            description_zh=content.description_zh,
+            censorship=content.censorship,
+            nyaa_url="",
+            official_url=content.official_url,
+        )
+        return clean_card_title(card) != display_code
+
     async def _refresh_status(self, content_id: str) -> None:
         """Recompute ``metadata_status`` after the translations ran.
 
         With translation enabled a card is only complete when the title has a
         Chinese line too; a missing translation stays PARTIAL so the next publisher
-        round retries it.
+        round retries it. A bare-number title (nothing but the FC2 code) has no text
+        to translate, so it is exempt from the Chinese title requirement.
         """
 
         async with self.db.transaction() as session:
@@ -470,7 +493,12 @@ class MetadataService:
             if content is None:
                 return
             complete = bool(content.title_ja and content.description_ja)
-            if complete and self.translator is not None and not content.title_zh:
+            if (
+                complete
+                and self.translator is not None
+                and not content.title_zh
+                and self._title_needs_chinese(content)
+            ):
                 complete = False
             content.metadata_status = (
                 MetadataStatus.COMPLETE if complete else MetadataStatus.PARTIAL
