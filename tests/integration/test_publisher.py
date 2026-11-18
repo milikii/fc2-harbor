@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Settings
-from app.db.enums import AssetRole, ContentType, CoverStatus, NotificationStatus
+from app.db.enums import AssetRole, Censorship, ContentType, CoverStatus, NotificationStatus
 from app.db.models import Asset, Content, Notification, ProviderResult, Release
 from app.db.session import Database
 from app.network.image_fetcher import ImageFetcher
@@ -512,7 +512,7 @@ async def test_card_shows_size_and_time_from_the_release(db: Database, tmp_path:
 
     caption = bot.messages[0][1]
     assert "💾 3.72 GiB · 🕒 2025-11-15 03:01" in caption
-    assert caption.startswith("<b>FC2-PPV-1234567</b>\n🏷️ 未知\n\nサンプル作品")
+    assert caption.startswith("<b>FC2-PPV-1234567</b>\n🏷️ 有码\n\nサンプル作品")
 
 
 async def test_card_survives_a_release_without_size(db: Database, tmp_path: Path) -> None:
@@ -802,3 +802,91 @@ async def test_a_normal_official_description_is_shown(db: Database, tmp_path: Pa
     await publisher.publish_once()
 
     assert "📝 素人初撮り。" in bot.messages[0][1]
+
+
+# -- enrichment must be visible on the card it just produced ----------------
+
+
+class StaleMetadata:
+    """Enrichment stub that rewrites the row *after* the publisher loaded it."""
+
+    def __init__(
+        self,
+        db: Database,
+        *,
+        description_ja: str | None = None,
+        censorship: Censorship | None = None,
+        delete: bool = False,
+    ) -> None:
+        self.db = db
+        self.description_ja = description_ja
+        self.censorship = censorship
+        self.delete = delete
+
+    async def enrich(self, content_id: str) -> None:
+        async with self.db.transaction() as session:
+            content = await session.get(Content, content_id)
+            if content is None:
+                return
+            if self.delete:
+                await session.delete(content)
+                return
+            if self.description_ja is not None:
+                content.description_ja = self.description_ja
+            if self.censorship is not None:
+                content.censorship = self.censorship
+
+
+def build_publisher_with(
+    db: Database, settings: Settings, bot: FakeBot, metadata: object
+) -> Publisher:
+    """Like :func:`build_publisher`, but with a stubbed metadata service."""
+
+    return Publisher(
+        db=db,
+        metadata=metadata,  # type: ignore[arg-type]
+        uploader=TelegramAssetUploader(db=db, bot_name="subscription"),
+        bot=bot,
+        settings=settings,
+    )
+
+
+async def test_enrichment_result_reaches_the_card(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    await seed(db, tmp_path, previews=0, cover=False)
+    enriched = "補完された説明文です。これは十分に長い文章で、カードに反映されるはずです。"
+    metadata = StaleMetadata(db, description_ja=enriched, censorship=Censorship.CENSORED)
+    bot = FakeBot()
+    publisher = build_publisher_with(db, settings, bot, metadata)
+
+    await publisher.publish_once()
+
+    caption = bot.messages[0][1]
+    assert enriched in caption
+    assert "🏷️ 有码" in caption
+    assert "作品の説明です。" not in caption
+
+
+async def test_content_deleted_during_enrichment_is_skipped(db: Database, tmp_path: Path) -> None:
+    settings = make_settings(
+        tmp_path,
+        telegram={"allowed_user_ids": "111"},
+        publisher={"require_cover": False},
+    )
+    content_id = await seed(db, tmp_path, previews=0, cover=False)
+    bot = FakeBot()
+    publisher = build_publisher_with(db, settings, bot, StaleMetadata(db, delete=True))
+
+    report = await publisher.publish_once()
+
+    assert report.skipped == 1
+    assert report.published == 0
+    assert report.failed == 0
+    assert bot.messages == []
+    assert bot.photos == []
+    async with db.session() as session:
+        assert await session.get(Content, content_id) is None
